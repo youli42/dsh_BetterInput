@@ -41,9 +41,11 @@
 
 1. **包名与 bundle id 必须一致** —— 定为 `dsh-better-input`，客户端 bundle 里写死同名字面量（宿主按包名组合 boot graph，不一致会加载不到）。
 2. **客户端半拿不到插件配置**（新发现，已影响设计）：web shell 用 `o.create({ name })` 创建客户端条目，boot graph 行只有 `{ id, url, rev, inject, immediately }`，没有 config 字段。所以 `seat` / `presets` / 撤销深度这类**客户端**选项只能由插件自己的 HTTP 路由下发；座位写死为 `conversation.input.right`，撤销深度写死为 10（与宿主默认值一致）。
-3. **点快照 props 的陷阱**（P2 实现要点）：座位组件拿到的是 owner props **点快照**，
-   异步回调里直接读闭包里的 `props.input` 会拿到过期数据。实现上用一个 `latest` ref
-   （每次渲染写入最新 props）供异步路径读取，CAS 与撤销校验都从 `latest.current.input` 取值。
+3. **owner props 是个陷阱，且随版本变化**（真机事故，见 R-13）：已装 0.1.2-rc.1 对
+   `conversation.input.left/right` 调 `renderSlot(name, {})`，**没有** `input`/`session`；
+   第一版按「owner 是 InputZone」读 `props.input.phase`，点击即 `TypeError`。
+   现在状态只从 `props.useInput((state) => state)` 读，并在每次渲染把
+   `{ input, inputActions }` 写进一个 `live` ref 供异步路径使用（CAS 与撤销校验都读 ref）。
 4. **`presets` 已在宿主侧实现**：`presetId` → 对应 `prompt` 追加到 system，未知名报 400。P4 只是补前端菜单 UI。
 5. **max-tokens 截断改为「返回已获得文本 + `truncated: true`」**，不当失败——撤销按钮兜底，比丢结果更有用。
 6. **取消链路是闭环的**：浏览器半生成中再点 = `AbortController.abort()`；宿主半靠
@@ -175,12 +177,20 @@ function apply(ctx) {
 
 会话作用域座位组件的 props 由三段合并而成（`ui-slots/src/index.ts:211` 的 `PropsRuntime`）：
 
-1. **owner props**：`conversation.input.left/right` 的 owner 是 `InputZone = { session, input }`
-   （`ui-conversation/src/client/contract/slots.ts:274`），其中 `input: InputState` 是**点快照**，骨架在任一 store 变化时重渲染，条目无需自己订阅。
-2. **session standard kit**（两处 declaration merge 合并的结果）：
+1. **owner props —— 座位而异，且随版本变化**：
+   - `conversation.input.dock` 的 owner 是 `InputZone = { session, input }`（点快照）；
+   - **`conversation.input.left/right` 在已安装版本（0.1.2-rc.1）里根本没有 owner props**：
+     已装 `ui-conversation/lib/client.js:15637/15642` 是 `renderSlot("conversation.input.left", {})`
+     与 `renderSlot("conversation.input.right", {})`；只有新版本源码（`ConversationRoot.tsx:152-153`）
+     才把 `zone` 传给这两个座位。**所以绝不要读 `props.input`。**
+2. **session standard kit**（三处 declaration merge 合并的结果，与 owner props 无关，是可靠来源）：
    - `ui-conversation`：`useInput: SnapshotSelectorHook<InputState>`、`inputActions: InputActions`
-   - `client/runtime`：`sessionId`、`useSession`、`useProjection`
+   - 已装 `ui-session`：`sessionId`、`useSession`、`useProjection`
+   - 已装 `ui-chat`：`useChat`
 3. **本插件的 inject 面** + `t()`。
+
+因此**唯一的读取姿势是 `props.useInput((state) => state)`**（渲染路径），异步路径用 ref 存住它。
+已装版本不存在 `useConversation`（那是新版本 `ui-conversation` 才合并进 kit 的），所以状态一律走 `useInput`。
 
 `InputState`（`ui-conversation/lib/types/client/contract/input.d.ts:295`）关键字段：
 
@@ -194,8 +204,9 @@ readonly imageIds: readonly DraftAttachmentId[]
 
 `InputActions` 里的写入口：`setDraft(text)`、`submit()`、`addImages/removeImage/pruneImages`。
 
-于是组件只依赖三样东西：`useInput(s => s.draft)`（响应式读）、`latest.current.input`（异步路径读最新点快照）、
-`inputActions.setDraft()`（写）。实现见 `lib/client.js` 的 `BetterInputButton`，其数据流是：
+于是组件只依赖三样东西：`props.useInput((state) => state)`（渲染期读状态 + 写入 ref）、
+`live.current.input`（异步路径读最新值）、`props.inputActions.setDraft()`（写）。实现见
+`lib/client.js` 的 `BetterInputButton`，其数据流是：
 
 ```
 点击 ──► 取快照(before, rev) ──► POST /optimize ──┬─► 失败/取消 ──► 提示（不写草稿）
@@ -204,9 +215,16 @@ readonly imageIds: readonly DraftAttachmentId[]
                                                               └─ 一致 ──► setDraft(text) + 压撤销栈
 ```
 
-**实现要点（踩过的坑）**：座位组件拿到的是 owner props **点快照**，异步回调里读闭包捕获的
-`props.input` 会拿到过期数据——必须用一个每次渲染都更新的 `latest` ref 作为异步路径的唯一读取口，
-CAS 判断与撤销校验都从 `latest.current.input` 取值。
+**实现要点（真机上踩过的坑）**：第一版按「left/right 的 owner 是 InputZone」写，直接读
+`props.input.phase`，真机点击时抛 `TypeError: Cannot read properties of undefined (reading 'phase')`。
+正确姿势有两条，缺一不可：
+
+1. 状态只从 `props.useInput((state) => state)` 读（框架注入的标准道具，与座位 owner 无关）；
+2. 每次渲染把读到的状态与 `props.inputActions` 写进一个 `live` ref，异步回调只从 ref 读
+   （既避开点快照/闭包过期，又天然兼容「有没有 owner props」两种版本）。
+
+同理 `props.sessionId` 也不能想当然：它来自已装 `ui-session` 的 kit 合并，装不到那个包时为空——
+实现里对空值做了回落（`'current'`），不至于崩，但撤销栈会退化成全局共享（有 CAS 兜底）。
 
 **红线**：
 - ❌ 不要 `querySelector` 改输入框 DOM。已安装版本的 composer 是 Lexical contenteditable + 芯片节点（`lib/types/client/input/editor/ComposerContentEditable.d.ts`、`chip-node.d.ts`），DOM 改法会被下一次渲染冲掉，还会绕过输入机状态机。（本地源码检出的 `InputBar.tsx` 已改为 `textarea + backdrop` 方案——**两版都靠同一套 `draft`/`setDraft` 契约**，这正是不要碰 DOM 的理由。）
@@ -507,6 +525,7 @@ window.__ModuleLoader__.load({
 | R-10 | 客户端半没有配置通道（shell 用 `loader.create({name})` 建条目，boot graph 行不含 config） | 座位/预设等客户端选项无法直接由 `cordis.patch.yml` 配置 | 客户端选项改由插件自己的 HTTP 路由下发（P4 加 `GET /config`）；P0 座位先写死 |
 | R-11 | 本地开发时 `@deepseek-ai/dsh-llm` 在本工作区不可解析 | 宿主半单测跑不起来 | 建开发用 junction `node_modules/@deepseek-ai/dsh-llm`（`.gitignore` 已忽略）；装进 profile 后天然可见 |
 | R-12 | Windows 上 patch 的 `name` 写绝对路径不解析（Loader 对非 `.` specifier 直接 `import(name)`，`D:\` 被当成 URL scheme `d:`）；相对 specifier 又相对 profile 目录（C 盘）解析，跨盘无解 | 无法用「绝对路径直挂」这个便捷开发方式 | 必须先用 `dsh plugin --profile web add link:<本目录>` 装进 profile 的 node_modules，再用包名引用（README 安装章节已写明） |
+| R-13 | **真机事故**：已装 0.1.2-rc.1 对 `conversation.input.left/right` 调 `renderSlot(name, {})`，**没有 owner props**；只有新版本源码才传 `InputZone` | 第一版读 `props.input` → 点击即 `TypeError`，功能废掉 | 状态一律走 `props.useInput`；异步路径走渲染期写入的 ref；文档与测试按「两种形状」覆盖（`test/client.smoke.mjs` 的 `inputZone` 开关）。升级 dsh 后需重核 |
 
 ---
 

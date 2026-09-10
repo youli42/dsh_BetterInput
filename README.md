@@ -117,6 +117,11 @@ node test\client.smoke.mjs   # 浏览器半 18 例：座位注册、组件契约
 | 输入机非空闲（提交/裁决中） | 按钮禁用 |
 | 宿主报错 | 直接展示宿主返回的 `message`（如「草稿 9001 字，超过上限 8000 字」）；403/404 有专门文案 |
 
+> **版本适配（真机踩坑记录）**：已安装的 dsh 0.1.2-rc.1 对 `conversation.input.left/right` 调的是
+> `renderSlot(name, {})`，**没有 owner props**——所以本插件一律通过框架注入的 `useInput` 读输入状态，
+> 不读 `props.input`（新版本源码才把 `InputZone` 传给这两个座位）。`sessionId` 来自 `ui-session` 的
+> kit 合并，缺包时回落到全局单栈（有 CAS 兜底）。详见 `DESIGN.md` 的 R-3 / R-13。
+
 提示文本用 GUI 的设计令牌上色（`--dsw-alias-state-{success,warn,error}-primary`），令牌缺失时回落 `currentColor`。
 
 ## 配置参考（`cordis.patch.yml` 的 `config:`）

@@ -196,7 +196,7 @@ const nextSessionId = () => `session-${String(++sessionCounter)}`
 
 /**
  * 挂载一次组件：模块 → apply → 座位条目 → 组件。
- * @param {{ draft?: string, phase?: string, sessionId?: string, primitives?: object }} options - 初始状态。
+ * @param {{ draft?: string, phase?: string, sessionId?: string, primitives?: object, inputZone?: boolean }} options - 初始状态。
  * @returns {object} harness。
  */
 function mount(options = {}) {
@@ -212,7 +212,7 @@ function mount(options = {}) {
   const component = seat[0].component
   const written = []
 
-  /** 渲染一次：从真值生成新快照（模拟框架给组件的 owner props 点快照）。 */
+  /** 渲染一次：从真值生成新快照（模拟框架给组件的会话标准道具）。 */
   const view = () => {
     const snapshot = { ...truth, occurrences: [...truth.occurrences] }
     const props = {
@@ -226,7 +226,9 @@ function mount(options = {}) {
         },
       },
       sessionId,
-      input: snapshot,
+      // 默认**不**提供 owner props：已安装版本（0.1.2-rc.1）对 conversation.input.left/right
+      // 调的是 renderSlot(name, {})，props.input 必然是 undefined；只有新版本源码才传 InputZone。
+      ...options.inputZone === true ? { input: snapshot, session: { sessionId } } : {},
     }
     cursor = 0
     const node = component(props)
@@ -234,6 +236,7 @@ function mount(options = {}) {
     const note = childrenOf(node).find(child => child.type === 'span')
     return {
       node,
+      props,
       optimize: buttons.find(button => button.props['data-dsh-better-input'] !== undefined),
       undo: buttons.find(button => button.props['data-dsh-better-input-undo'] !== undefined) ?? null,
       /** 提示正文（无提示时为 null）。 */
@@ -311,6 +314,34 @@ await test('没有撤销记录时不渲染撤销按钮', () => {
 await test('图标缺失时降级为文字符号，不抛错', () => {
   const { optimize } = mount({ draft: 'x', primitives: {} }).view()
   assert.equal(childrenOf(optimize)[0], '✨')
+})
+
+console.log('client half: owner props 缺失（已安装版本形状）')
+await test('无 owner props 时读取全走 useInput，点击不抛错', async () => {
+  const network = installFetch()
+  const harness = mount({ draft: '我的草稿' })
+  const view = harness.view()
+  assert.equal(view.props.input, undefined, '本用例必须模拟「没有 InputZone owner props」')
+  assert.equal(view.props.session, undefined)
+  // 组件渲染只依赖 useInput / inputActions / sessionId / t
+  assert.equal(view.optimize.props.disabled, false)
+  const pending = view.optimize.props.onClick()   // 同步段不得抛错（旧版曾在此读 props.input.phase）
+  assert.equal(network.calls.length, 1)
+  assert.deepEqual(network.calls[0].body, { text: '我的草稿', sessionId: harness.sessionId })
+  network.respond({ data: { text: '优化后的草稿' } })
+  await pending
+  assert.deepEqual(harness.written, ['优化后的草稿'])
+})
+await test('新版本形状（带 InputZone owner props）行为一致', async () => {
+  const network = installFetch()
+  const harness = mount({ draft: '我的草稿', inputZone: true })
+  const view = harness.view()
+  assert.notEqual(view.props.input, undefined, '本用例必须带上 owner props')
+  const pending = view.optimize.props.onClick()
+  network.respond({ data: { text: '优化后的草稿' } })
+  await pending
+  assert.deepEqual(harness.written, ['优化后的草稿'])
+  assert.notEqual(harness.view().undo, null)
 })
 
 console.log('client half: P2 接线')

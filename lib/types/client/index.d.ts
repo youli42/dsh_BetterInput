@@ -13,14 +13,18 @@
 export interface BetterInputProps {
   /** locale 座位（注册时 `locale: 'inputOptimizer'` 注入）。 */
   t: (key: string) => string
-  /** 会话输入机状态选择器钩子（框架注入）。 */
+  /** 会话输入机状态选择器钩子（框架注入，ui-conversation 的 kit 合并）。 */
   useInput: <T>(selector: (state: BetterInputState) => T) => T
   /** 公开输入动作面（框架注入）——写回草稿的唯一正确入口。 */
   inputActions: { setDraft: (text: string) => void }
-  /** 框架解析出的会话 id。 */
+  /** 框架解析出的会话 id（ui-session 的 kit 合并；缺包时实现回落到 'current'）。 */
   sessionId: string
-  /** 输入区 owner props 的点快照。 */
-  input: BetterInputState
+  /**
+   * 输入区 owner props 点快照——**只有新版本 dsh 才给 `conversation.input.left/right` 传**。
+   * 已安装的 0.1.2-rc.1 传的是 `renderSlot(name, {})`，这里必然是 undefined：
+   * 所以状态一律从 `useInput` 读，`input` 仅作为可选加速项。
+   */
+  input?: BetterInputState
 }
 
 /** InputState 中本插件用到的字段。 */
