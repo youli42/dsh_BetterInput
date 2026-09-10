@@ -21,9 +21,10 @@ DSH Web GUI 插件：在**模型选择器左侧**加一个「AI 优化输入」�
 | P5.4 | 信任判定改走框架 `ctx.connection.requestRejection()`（能力路由要浏览器会话） | ✅ 已实现（2026-09-11） |
 | P5.5 | 并发闸门：同会话单航班（409）+ 全局并发上限（429） | ✅ 已实现（2026-09-11） |
 | P5.7 | 工程化：Biome lint、约定守卫、真 React 渲染测试、CI | ✅ 已实现（2026-09-11） |
-| P5.6 / P5.7b / P5.7c / P5.8 | 流式回填、typecheck（缺 tsc）、vitest+jsdom、芯片保留 | ⬜ 待做（见「下一步」与「工程化」） |
+| P5.6 | 流式回填：/optimize/stream（SSE）边生成边替换草稿，失败还原原文 | ✅ 已实现（2026-09-11） |
+| P5.7b / P5.7c / P5.8 | typecheck（缺 tsc）、vitest+jsdom、芯片保留 | ⬜ 待做（见「下一步」与「工程化」） |
 
-检查：lint 零发现 · 约定守卫 8 条 · 测试 42 + 42 + 6 + 3 = 93 例，全绿
+检查：lint 零发现 · 约定守卫 11 条 · 测试 49 + 48 + 6 + 3 = 106 例，全绿
 （`npm run verify` = lint + 全部检查；`npm test` 会先自动补齐 dev 依赖链接）。
 
 > **运行前提**：仓库里没有 `node_modules` 时，`npm test` 与 `link:` 方式安装后的运行时都跑不起来
@@ -35,7 +36,7 @@ DSH Web GUI 插件：在**模型选择器左侧**加一个「AI 优化输入」�
 package.json          双半声明：main(lib/index.js) + exports["./client"] + dsh.client/bundle
 biome.json            lint 配置（只 lint 不 format，见「工程化」）
 cordis.patch.yml      bundle patch + 组合层配置（设置页的用户值优先于它）
-lib/index.js          宿主半：4 条路由 + LLM 一次性调用 + 并发闸门
+lib/index.js          宿主半：5 条路由（一次性 JSON + 流式 SSE）+ LLM 调用 + 并发闸门
 lib/settings.js       宿主半：设置命名空间 schema 与跨字段校验（注册挂在 settings 就绪时）
 lib/policy.js         策略层：零依赖，配置校验/信任围栏/生效配置解析（可独立单测）
 lib/client.js         浏览器半：输入框按钮 + 预设菜单 + 撤销栈 + 设置页（手写 __ModuleLoader__ bundle）
@@ -44,8 +45,8 @@ scripts/check-guards.mjs  约定守卫：把踩过的坑变成可自动检查的
 scripts/dsh-packages.mjs  定位 dsh 安装与其中的宿主包（脚本与测试共用）
 scripts/link-dev-deps.mjs 把宿主依赖软链进本仓库（`npm test` 前自动跑；CI 里自动跳过）
 scripts/lint.mjs      找 Biome 并跑 lint（仓库内 / 全局安装都能用）
-test/smoke.mjs        宿主半冒烟测试（42 例）
-test/client.smoke.mjs 浏览器半冒烟测试（42 例：接线、预设菜单、宿主下发规则、撤销栈、设置页）
+test/smoke.mjs        宿主半冒烟测试（49 例）
+test/client.smoke.mjs 浏览器半冒烟测试（48 例：接线、流式回填、预设菜单、宿主下发规则、撤销栈、设置页）
 test/client.react.mjs 真 React 渲染测试（6 例：真 react/react-dom SSR，含"不得有 React 警告"）
 test/settings-activation.mjs 真框架集成测试（3 例：真实 cordis + 真实 settings 提供者）
 .github/workflows/ci.yml  CI：lint + 约定守卫 + 四个套件（Windows）
@@ -153,8 +154,8 @@ curl.exe -s -X POST http://127.0.0.1:3080/api/dsh-input-optimizer/check `
 ```powershell
 npm run verify                    # lint + 约定守卫 + 四个套件（推荐）
 npm test                          # 约定守卫 + 宿主半 + 浏览器半 + 真 React + 真框架集成
-node test\smoke.mjs               # 宿主半 42 例：生效配置、信任判定、并发闸门、四路由全链路、注册时机
-node test\client.smoke.mjs        # 浏览器半 42 例：座位、预设菜单、宿主下发规则、撤销栈、设置页
+node test\smoke.mjs               # 宿主半 49 例：生效配置、信任判定、并发闸门、五路由全链路、SSE 分帧
+node test\client.smoke.mjs        # 浏览器半 48 例：座位、流式回填、预设菜单、宿主下发规则、撤销栈、设置页
 node test\client.react.mjs        # 真 React 6 例：真 react/react-dom SSR 渲染（含"不得有 React 警告"）
 node test\settings-activation.mjs # 真框架集成 3 例：真实 cordis + 真实 settings 提供者，钉住注册时机
 ```
@@ -173,6 +174,7 @@ node test\settings-activation.mjs # 真框架集成 3 例：真实 cordis + 真�
 | 点击 ✨ | `POST /api/dsh-input-optimizer/optimize`（body `{ text, sessionId }`），成功后 `setDraft` 写回 |
 | 预设菜单（`▾`） | 只在宿主配了 `presets` 时出现；选中后请求带 `presetId`，宿主把该预设的 prompt 追加到 system。菜单向上弹出，点外面或 Esc 收起 |
 | 草稿超过宿主上限 | 本地直接提示「草稿过长（n/上限）」，不发请求（上限来自 `/catalog` 的 `limits`） |
+| 流式回填 | 默认走 SSE：增量到达即改写草稿（80ms 节流）；失败/中断会还原原文（详见下节） |
 | 同会话重复请求 | 宿主返回 `409 busy-session`（多标签页同时点同一会话时可见），提示「这个会话已经在优化中了」 |
 | 全局并发打满 | 宿主返回 `429 too-many-requests`（默认上限 4，可用 `maxConcurrentCalls` 调），提示带上限值 |
 | 生成中再点 | **取消**（abort；宿主侧同时取消上游模型调用，不产生费用累积） |
@@ -191,6 +193,26 @@ node test\settings-activation.mjs # 真框架集成 3 例：真实 cordis + 真�
 > kit 合并，缺包时回落到全局单栈（有 CAS 兜底）。详见 `DESIGN.md` 的 R-3 / R-13。
 
 提示文本用 GUI 的设计令牌上色（`--dsw-alias-state-{success,warn,error}-primary`），令牌缺失时回落 `currentColor`。
+
+## 流式回填（P5.6）
+
+点击 ✨ 后不再"转圈等一整段"：宿主走 **SSE** 把文本增量推过来，客户端**边收边写回草稿**，
+所以你能看着草稿被逐句替换。要点：
+
+- **两条路由并存**：`POST /optimize/stream`（SSE，默认走它）与 `POST /optimize`（一次性 JSON，回退）。
+  两者**准入条件完全一致**（共用同一段校验：信任判定、字数上限、并发闸门、生效配置），
+  否则"流式那条更松"就会变成绕过口子。
+- **自动回退**：旧宿主没有这条路由（404/405）、浏览器拿不到 `response.body`、或网络层失败时，
+  客户端自动改用一次性 JSON——流式是**增强**，不该在任何环境里变成新的失败面。
+- **写入节流 80ms**：不按 token 写，避免每个增量都触发一次编辑器整体重写（节流期间先攒着，
+  收尾时一定写最终文本）。
+- **失败不留半截草稿**：流中途 error 帧 / 连接被掐断时，把已经写进去的增量**还原成原文**，
+  再提示失败原因（提示里带「已还原原文」）。
+- **CAS 换了判据**：流式下每次写入都会推进 `draftRev`，所以不能再拿它当基线（那会把自己写的东西
+  判成"用户改过"）。改为记住"本次调用里我们写过的每一版文本"：当前草稿落在集合之外才算用户手改，
+  此时立刻中止（宿主侧随之取消上游）并提示「草稿已变化」。
+- **取消/超时**：生成中再点 = 取消（照旧）；超时会给客户端一个 `error: timeout` 事件，
+  而客户端自己断了就不再往那条 socket 写。
 
 ## 设置页（设置 → 输入优化）
 
@@ -272,6 +294,15 @@ body: { text: string, sessionId?: string, presetId?: string }
 502 { error: 'no-model-route' | 'model-failed', message }
 504 { error: 'timeout' }
 
+POST /api/dsh-input-optimizer/optimize/stream        // SSE，客户端默认走这条
+body: 与 /optimize 完全相同
+状态码：准入阶段（校验/闸门/信任判定）失败时与 /optimize 完全一致；**一旦开流就只走事件**：
+  : ok                                    // 注释帧：流已开（立即 flush）
+  event: delta  data: { text }            // 文本增量（只发 text-delta，不发 reasoning）
+  event: done   data: { text, modelUsed, presetId?, truncated? }
+                                          // text 是装配后的权威文本，客户端以它为准
+  event: error  data: { error, message }  // 'model-failed' | 'timeout' | 其它请求级错误码
+
 GET  /api/dsh-input-optimizer/catalog
 200 { namespace,
       settings: { available, reason?, section },
@@ -333,9 +364,9 @@ npm run link-deps  # 手动补 dev 依赖链接（pretest 会自动跑）
 | 检查 | 覆盖什么 | 覆盖不到什么 |
 |---|---|---|
 | **Biome lint** | 未使用变量/导入、可选链、赋值混进表达式、等宽比较等 | 不做类型检查（Biome 不是类型检查器） |
-| **约定守卫**（`scripts/check-guards.mjs`） | 8 条规则，逐条对应真实事故：`ctx.get('logger')`、设置注册一次性读、样式未打 `data-plugin`、保存未自查、并发闸门占位/释放、客户端自带宿主区间常量、新套件没接进 `npm test` | 只认字面写法，不理解语义（所以规则要写"为什么"） |
-| **宿主半冒烟**（42 例） | 配置校验、信任判定三分支、四路由全链路、注册时机、并发闸门、日志与错误码 | 不碰真实 LLM（`ctx.llm.stream` 是替身） |
-| **浏览器半冒烟**（42 例） | 座位注册、组件契约、接线与 CAS、预设菜单、撤销栈、设置页（含"保存未生效"） | 用**手写 React 替身**：hook 语义是简化的 |
+| **约定守卫**（`scripts/check-guards.mjs`） | 11 条规则，逐条对应真实事故：`ctx.get('logger')`、设置注册一次性读、样式未打 `data-plugin`、保存未自查、并发闸门占位/释放、客户端自带宿主区间常量、SSE 分帧与流式回退、新套件没接进 `npm test` | 只认字面写法，不理解语义（所以规则要写"为什么"） |
+| **宿主半冒烟**（49 例） | 配置校验、信任判定三分支、五路由全链路、SSE 分帧与断流、注册时机、并发闸门、日志与错误码 | 不碰真实 LLM（`ctx.llm.stream` 是替身） |
+| **浏览器半冒烟**（48 例） | 座位注册、组件契约、接线与 CAS、**流式回填（节流/中止/还原/回退）**、预设菜单、撤销栈、设置页 | 用**手写 React 替身**：hook 语义是简化的 |
 | **真 React 渲染**（6 例） | 用真 `react`/`react-dom` 走 SSR 真渲染路径，并把渲染期 `console.error`（React 的警告通道）当失败 | SSR 不跑 effect、也没有 DOM：拉目录/订阅/点击/菜单开合不在范围 |
 | **真框架集成**（3 例） | 真 cordis + 真 `dsh-settings-file`：提供者先到/后到/缺失三种时序，以及"注册后写得进 `settings.yaml`" | 不启真实 webserver（路由用替身捕获） |
 

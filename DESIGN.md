@@ -35,7 +35,7 @@
 | `lib/client.js` | 浏览器半：输入框按钮 + CAS + 撤销栈 + **设置页**（手写 bundle，无构建步骤） |
 | `lib/types/*.d.ts` | 对外契约类型（含组件行为契约、设置段字段） |
 | `scripts/link-dev-deps.mjs` | 把宿主的 `@deepseek-ai/*` 软链进本仓库（`pretest` 自动跑；`link:` 安装的运行时同样必需） |
-| `test/smoke.mjs`（42 例）、`test/client.smoke.mjs`（42 例）、`test/client.react.mjs`（6 例）、`test/settings-activation.mjs`（3 例） | 共 93 例，全绿；外加 8 条约定守卫与 Biome lint（`npm run verify`） |
+| `test/smoke.mjs`（49 例）、`test/client.smoke.mjs`（48 例）、`test/client.react.mjs`（6 例）、`test/settings-activation.mjs`（3 例） | 共 106 例，全绿；外加 11 条约定守卫与 Biome lint（`npm run verify`） |
 
 **验收证据**：P0 曾在 Web GUI 目视确认（2026-09-10，当时用 `link:D:\SSDWP\AI\dsh\BetterInput` 装入 profile）。
 2026-09-11 复核时发现该路径已不存在、profile 里也没有本插件（bundles 无条目、patch 为空、`node_modules` 无包），
@@ -229,6 +229,38 @@ P1 的路由此后仍需在真机上 curl 一次（单测用假 LLM 流覆盖了
     · **vitest + jsdom 迁移**：真 React SSR 套件已经把"组件是否合法 / 有没有 React 警告"这一层补上了，
        剩下的收益（effect、点击、菜单开合用真 DOM 跑）不足以支撑把 84 例冒烟测试整体重写一遍的风险，
        因此降级为可选（P5.7c）。
+
+### P5.6（流式回填，2026-09-11）
+
+32. **两条路由并存，准入条件共用**：新增 `POST /optimize/stream`（SSE），**保留** `POST /optimize`
+    （一次性 JSON）作为回退。两者共用 `prepareCall()` 做方法/信任判定/字数上限/并发闸门/生效配置解析——
+    如果各写一份，"流式那条更松"就会立刻变成一个绕过口子（例如不查闸门 = 白烧 token）。
+33. **帧协议与"权威文本"**：开流先 flush 一个注释帧（`: ok`）让客户端与中间层立刻知道流已开；
+    增量只转发 `text-delta`（reasoning 增量不发）；收尾 `done` 帧带**装配后的文本**，客户端以它为准——
+    这样"增量拼接"与"最终装配"在边界上不一致时（trim、空块、未知终态）不会出现前后自相矛盾的草稿。
+    开流**前**的失败仍走 HTTP 状态码（客户端能复用既有文案映射）；开流**后**的失败只发 `error` 帧。
+34. **断流与超时的区别对待**：超时给客户端发 `error: timeout`（人还在，应该看到原因）；
+    客户端自己断开就不写（往已销毁的 socket 写只会产生无用错误事件）。`send()` 同时检查
+    `writableEnded` 与"客户端已断开"，双保险。
+35. **客户端：增量回填 + 节流 + 新的 CAS 判据**：
+    · 增量到达立刻 `setDraft`，但**节流 80ms**——按 token 写会让编辑器每次整体重写，代价远大于收益；
+      节流期间先攒着，收尾一定写最终文本。
+    · **CAS 不能用 `draftRev`**：流式下每次写入都会推进 revision，自己写的东西会被自己判成"用户改过"。
+      也不能用"最后一次写入 == 当前草稿"这种精确比对——写完之后组件未必立刻重渲染，渲染快照可能滞后。
+      最终用**集合**：记住本次调用里"原文 + 我们写过的每一版"，当前草稿落在集合之外才算用户手改。
+      这个判据在真机与测试替身下都成立（替身不会自动重渲染，正好暴露了精确比对的问题）。
+    · 用户中途手改 → 立刻 `abort()`（宿主侧随之取消上游）并提示「草稿已变化」。
+    · 流中途失败/被掐断 → 把已写入的增量**还原成原文**再报错（不留半截草稿），提示带「已还原原文」。
+    · 不支持流式（旧宿主 404/405、无 `response.body`、网络层失败）→ 自动回退一次性 JSON，
+      并且回退前先还原增量痕迹；**流式是增强，不该在任何环境里变成新的失败面**。
+36. **测试分层**：宿主侧新增 7 例（帧顺序与"流未结束就已写出增量"、done 的权威文本、截断标注、
+    error 帧与未知终态、准入失败仍用状态码、断流不写且闸门归还、超时发 timeout 事件）。
+    客户端新增 6 例（节流写入 + 以 done 为准 + 单条撤销记录、中途手改中止、error 帧还原、断流还原、
+    旧宿主回退、取消）。
+    测试替身也随之升级：`installFetch` 现在有三种形态（目录 / 流式 / 回退），流式响应是可控
+    `ReadableStream`（`push`/`done`/`error`/`break`），并模拟了"signal 中止 = body 被取消"这一真实语义
+    （否则取消用例会永远等下一个 chunk）。顺带修掉替身里两个真 bug：`settleEntry` 先置 `settled`
+    导致 promise 永不结算、以及渲染快照用死拷贝导致"自己写的草稿"被误判成用户手改。
 
 ---
 
@@ -690,7 +722,8 @@ window.__ModuleLoader__.load({
 | **P5.4** 信任判定收敛 | 改走 `ctx.connection.requestRejection()`；能力路由要求浏览器会话 | ✅ 已实现（2026-09-11；见 §0.5 第 28 条） |
 | **P5.5** 并发闸门 | 同会话单航班（409）+ 全局并发上限（429，默认 4，可配 `maxConcurrentCalls`） | ✅ 已实现（2026-09-11；见 §0.5 第 29 条） |
 | **P5.7** 工程化 | Biome lint + 约定守卫 + 真 React 渲染测试 + CI（Windows） | ✅ 已实现（2026-09-11；见 §0.5 第 30–31 条） |
-| **P5.6 / 5.7b / 5.7c / 5.8** | 流式回填、typecheck（需有网环境）、vitest+jsdom、芯片保留 | ⬜ 待做（见 README「下一步」） |
+| **P5.6** 流式回填 | `/optimize/stream`（SSE）+ 客户端增量回填/节流/还原/回退 | ✅ 已实现（2026-09-11；见 §0.5 第 32–36 条） |
+| **P5.7b / 5.7c / 5.8** | typecheck（需有网环境）、vitest+jsdom、芯片保留 | ⬜ 待做（见 README「下一步」） |
 
 ---
 
@@ -723,6 +756,8 @@ window.__ModuleLoader__.load({
 | R-23 | **没有 typecheck**：本机无 tsc、无网络可装，只能靠单测 + 约定守卫兜类型/契约判错 | 同类缺陷（如 `info.context` 判型错）仍可能漏到真机 | P5.7b 待做（步骤见 README「工程化」）；当前以"约定守卫"覆盖已发现的判错模式 |
 | R-24 | 真 React 套件跑 SSR：**不执行 effect**，也不覆盖点击/菜单开合 | hook 依赖数组、订阅清理这类问题仍只能靠替身套件（语义是简化的）保护 | 目标明确写在 `test/client.react.mjs` 文件头；P5.7c（vitest+jsdom）可选补齐 |
 | R-25 | CI 的宿主依赖版本写死（`@deepseek-ai/*@0.1.2-rc.1`） | dsh 升级后 CI 可能装不上或与本地版本不一致 | dsh 升级时同步 `.github/workflows/ci.yml` 里的版本与 README 记录 |
+| R-26 | 流式下的 CAS 判据变了（文本集合 vs revision）：若用户手改后的文本**恰好等于**我们写过的某一版，会被当成"未改动"而覆盖 | 极低概率下覆盖一次用户输入 | 判据写在 §0.5 第 35 条；要彻底消除需要框架提供"写入来源"标记，当前不接受为此增加复杂度 |
+| R-27 | 节流 80ms：最后一段增量可能只在收尾时写入，观感上"末尾跳一下" | 轻微观感问题，不丢内容 | 收尾一定写 `done` 的权威文本（有专门用例） |
 
 ---
 
@@ -759,4 +794,4 @@ P0 期曾把「最小可跑骨架」抄在这里，但骨架会与真实代码�
 | 行为与接口契约（含撤销/取消语义、mutate 的失败语义） | [`lib/types/client/index.d.ts`](./lib/types/client/index.d.ts) |
 | 宿主契约与错误码清单 | [`lib/types/index.d.ts`](./lib/types/index.d.ts) |
 | 开发/`link:` 安装所需的依赖软链 | [`scripts/link-dev-deps.mjs`](./scripts/link-dev-deps.mjs)、[`scripts/dsh-packages.mjs`](./scripts/dsh-packages.mjs) |
-| 可执行的行为说明（42 + 42 + 6 + 3 = 93 例）+ 约定守卫 | [`test/smoke.mjs`](./test/smoke.mjs)、[`test/client.smoke.mjs`](./test/client.smoke.mjs)、[`test/settings-activation.mjs`](./test/settings-activation.mjs) |
+| 可执行的行为说明（49 + 48 + 6 + 3 = 106 例）+ 约定守卫 | [`test/smoke.mjs`](./test/smoke.mjs)、[`test/client.smoke.mjs`](./test/client.smoke.mjs)、[`test/settings-activation.mjs`](./test/settings-activation.mjs) |
