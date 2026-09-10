@@ -102,6 +102,9 @@ globalThis.document = {
   // 替身少这一层就会掩盖「样式会被别的插件认领走」这类问题。
   createElement: () => ({ id: '', textContent: '', dataset: {} }),
   getElementById: (id) => appendedStyles.find(style => style.id === id) ?? null,
+  // 预设菜单打开时会挂"点外面/Esc 关闭"的全局监听（真 DOM 一定有这两个方法）。
+  addEventListener: () => {},
+  removeEventListener: () => {},
 }
 
 await import('../lib/client.js')
@@ -219,12 +222,16 @@ function fakeCtx(options = {}) {
 
 /**
  * 装一个可手动结算的 fetch 替身。
+ *
+ * 注意：输入框按钮挂载时会读一次 `/catalog`（拿预设与区间），所以 **GET /catalog 立即结算**，
+ * 只有 POST /optimize 才是可悬挂、可手动结算的那一条——否则"取消/悬挂"类用例会被这次读目录搅乱。
+ * @param {{ presets?: object[], limits?: object, catalog?: object, failCatalog?: boolean }} [options] - 目录响应。
  * @returns {object} 门面：calls / pendingCount / respond / fail。
  */
-function installFetch() {
+function installFetch(options = {}) {
   const calls = []
   const entries = []
-  globalThis.fetch = (url, init) => new Promise((resolve, reject) => {
+  globalThis.fetch = (url, init) => {
     const record = {
       url,
       method: init?.method,
@@ -232,24 +239,46 @@ function installFetch() {
       body: init?.body === undefined ? undefined : JSON.parse(init.body),
     }
     calls.push(record)
-    /** 只允许结算一次，并记录已结算（取消也走这里）。 */
-    const entry = {
-      settled: false,
-      settle: (settleWith, value) => {
-        if (entry.settled) return
-        entry.settled = true
-        settleWith(value)
-      },
+    const isCatalog = url === ROUTE_CATALOG
+    const data = isCatalog
+      ? options.catalog ?? {
+        namespace: SETTINGS_NAMESPACE,
+        settings: { available: true, section: {} },
+        providers: [],
+        limits: options.limits ?? {
+          maxInputChars: 8000,
+          temperature: { min: 0, max: 2 },
+          maxOutputTokens: { min: 1, max: 200000 },
+          timeoutMs: { min: 1000, max: 600000 },
+        },
+        presets: options.presets ?? [],
+        effective: { provider: null, model: null, temperature: null, maxOutputTokens: 1024, timeoutMs: 30000 },
+      }
+      : undefined
+    if (isCatalog) {
+      const status = options.failCatalog === true ? 500 : 200
+      return Promise.resolve({ ok: status === 200, status, json: async () => data })
     }
-    entries.push(entry)
-    if (init?.signal !== undefined) {
-      const onAbort = () => entry.settle(reject, new DOMException('aborted', 'AbortError'))
-      if (init.signal.aborted) onAbort()
-      else init.signal.addEventListener('abort', onAbort)
-    }
-    entry.resolve = (value) => entry.settle(resolve, value)
-    entry.reject = (error) => entry.settle(reject, error)
-  })
+    return new Promise((resolve, reject) => {
+      /** 只允许结算一次，并记录已结算（取消也走这里）。 */
+      const entry = {
+        settled: false,
+        settle: (settleWith, value) => {
+          if (entry.settled) return
+          entry.settled = true
+          settleWith(value)
+        },
+      }
+      entries.push(entry)
+      if (init?.signal !== undefined) {
+        const onAbort = () => entry.settle(reject, new DOMException('aborted', 'AbortError'))
+        if (init.signal.aborted) onAbort()
+        else init.signal.addEventListener('abort', onAbort)
+      }
+      entry.resolve = (value) => entry.settle(resolve, value)
+      entry.reject = (error) => entry.settle(reject, error)
+    })
+  }
   /** 取最后一个未结算的请求条目。 */
   const pendingEntry = () => {
     const last = entries.findLast(item => !item.settled)
@@ -258,6 +287,9 @@ function installFetch() {
   }
   return {
     calls,
+    /** 只看优化请求（排除挂载时那次 GET /catalog），用例断言基本都用它。 */
+    get optimizeCalls() { return calls.filter(call => call.method === 'POST' && call.url === ROUTE) },
+    get catalogCalls() { return calls.filter(call => call.url === ROUTE_CATALOG) },
     get pendingCount() { return entries.filter(item => !item.settled).length },
     /**
      * 结算最后一次请求。
@@ -292,6 +324,28 @@ const nextSessionId = () => `session-${String(++sessionCounter)}`
  */
 async function tick(rounds = 6) {
   for (let index = 0; index < rounds; index += 1) await Promise.resolve()
+}
+
+/**
+ * 递归收集带某个 props 键的元素（预设菜单项嵌在 div 里，不是包裹节点的直接子元素）。
+ * @param {object} element - createElement 产物。
+ * @param {string} prop - props 键名。
+ * @returns {object[]} 命中元素。
+ */
+function byProp(element, prop) {
+  const found = []
+  const walk = (node) => {
+    if (node === null || typeof node !== 'object') return
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item)
+      return
+    }
+    if (node.props !== undefined && node.props[prop] !== undefined) found.push(node)
+    const children = node.children
+    if (Array.isArray(children)) for (const child of children) walk(child)
+  }
+  walk(element)
+  return found
 }
 
 /**
@@ -353,11 +407,20 @@ function mount(options = {}) {
     const node = component(props)
     const buttons = childrenOf(node).filter(child => child.type === 'button')
     const note = childrenOf(node).find(child => child.type === 'span')
+    const presetToggle = byProp(node, 'data-dsh-better-input-preset-toggle')[0] ?? null
+    const presetItems = byProp(node, 'data-dsh-better-input-preset')
+    const menu = byProp(node, 'data-dsh-better-input-menu')[0] ?? null
     return {
       node,
       props,
       optimize: buttons.find(button => button.props['data-dsh-better-input'] !== undefined),
       undo: buttons.find(button => button.props['data-dsh-better-input-undo'] !== undefined) ?? null,
+      /** 预设菜单按钮（没配预设时为 null）。 */
+      presetToggle,
+      /** 菜单项（按渲染顺序）。 */
+      presetItems,
+      /** 菜单是否展开（由 DOM 推导，而不是读组件内部 state）。 */
+      menuOpen: menu !== null,
       /** 提示正文（无提示时为 null）。 */
       get noteText() { return note === undefined ? null : childrenOf(note)[0] },
       get noteTone() { return note === undefined ? null : note.props['data-tone'] },
@@ -562,8 +625,8 @@ await test('无 owner props 时读取全走 useInput，点击不抛错', async (
   // 组件渲染只依赖 useInput / inputActions / sessionId / t
   assert.equal(view.optimize.props.disabled, false)
   const pending = view.optimize.props.onClick()   // 同步段不得抛错（旧版曾在此读 props.input.phase）
-  assert.equal(network.calls.length, 1)
-  assert.deepEqual(network.calls[0].body, { text: '我的草稿', sessionId: harness.sessionId })
+  assert.equal(network.optimizeCalls.length, 1)
+  assert.deepEqual(network.optimizeCalls[0].body, { text: '我的草稿', sessionId: harness.sessionId })
   network.respond({ data: { text: '优化后的草稿' } })
   await pending
   assert.deepEqual(harness.written, ['优化后的草稿'])
@@ -585,11 +648,11 @@ await test('成功路径：POST 到宿主路由并 setDraft，随后出现撤销
   const network = installFetch()
   const harness = mount({ draft: '帮我写个脚本' })
   const pending = harness.view().optimize.props.onClick()
-  assert.equal(network.calls.length, 1)
-  assert.equal(network.calls[0].url, ROUTE)
-  assert.equal(network.calls[0].method, 'POST')
-  assert.equal(network.calls[0].headers['content-type'], 'application/json')
-  assert.deepEqual(network.calls[0].body, { text: '帮我写个脚本', sessionId: harness.sessionId })
+  assert.equal(network.optimizeCalls.length, 1)
+  assert.equal(network.optimizeCalls[0].url, ROUTE)
+  assert.equal(network.optimizeCalls[0].method, 'POST')
+  assert.equal(network.optimizeCalls[0].headers['content-type'], 'application/json')
+  assert.deepEqual(network.optimizeCalls[0].body, { text: '帮我写个脚本', sessionId: harness.sessionId })
 
   network.respond({ data: { text: '请把脚本改写成……' } })
   await pending
@@ -651,6 +714,22 @@ await test('宿主错误：优先展示宿主 message；403/404/405 有专门文
   await pendingTwo
   assert.equal(second.view().noteText, 'forbidden')
 
+  // 401（宿主要求浏览器会话）：宿主自带可操作文案时必须优先展示它。
+  const unauthorized = installFetch()
+  const session = mount({ draft: 'x' })
+  const pendingSession = session.view().optimize.props.onClick()
+  unauthorized.respond({ status: 401, data: { error: 'unauthorized', message: '需要浏览器会话：请在 GUI 页面里操作' } })
+  await pendingSession
+  assert.equal(session.view().noteText, '需要浏览器会话：请在 GUI 页面里操作')
+
+  // 401 且响应体为空（例如被前置的认证层挡下）→ 用专门文案而不是"宿主返回错误 (HTTP 401)"。
+  const bare = installFetch()
+  const bareSession = mount({ draft: 'x' })
+  const pendingBare = bareSession.view().optimize.props.onClick()
+  bare.respond({ status: 401, data: null })
+  await pendingBare
+  assert.equal(bareSession.view().noteText, 'unauthorized')
+
   const missing = installFetch()
   const third = mount({ draft: 'x' })
   const pendingThree = third.view().optimize.props.onClick()
@@ -705,9 +784,150 @@ await test('草稿含芯片时拒绝发请求（整体替换会丢引用）', as
   const harness = mount({ draft: '看下 @a.ts' })
   harness.setOccurrences([{ occurrenceId: 1 }])
   await harness.view().optimize.props.onClick()
-  assert.equal(network.calls.length, 0, '不得发起请求')
+  assert.equal(network.optimizeCalls.length, 0, '不得发起请求')
   assert.equal(harness.view().noteText, 'chips')
   assert.deepEqual(harness.written, [])
+})
+
+console.log('client half: 预设菜单与宿主下发的规则（P5.2/P5.3）')
+await test('宿主配了预设：菜单按钮出现，选中后请求带 presetId', async () => {
+  const network = installFetch({ presets: [{ id: 'concise', label: '精简' }, { id: 'spec', label: '转规格' }] })
+  const harness = mount({ draft: '帮我写个爬虫' })
+  harness.view()
+  await tick()                       // 目录请求落地 → 预设渲染
+  let view = harness.view()
+  assert.notEqual(view.presetToggle, null, '配了预设就必须出现菜单按钮')
+  assert.equal(view.presetToggle.props['aria-expanded'], false)
+  assert.equal(view.presetToggle.props['aria-haspopup'], 'menu')
+  assert.equal(view.menuOpen, false, '默认不展开')
+
+  await view.presetToggle.props.onClick()
+  view = harness.view()
+  assert.equal(view.presetToggle.props['aria-expanded'], true)
+  assert.equal(view.menuOpen, true)
+  assert.deepEqual(view.presetItems.map(item => childrenOf(item)[0]), ['精简', '转规格'])
+
+  const pending = view.presetItems[1].props.onClick()
+  assert.deepEqual(network.optimizeCalls[0].body, {
+    text: '帮我写个爬虫',
+    sessionId: harness.sessionId,
+    presetId: 'spec',
+  })
+  network.respond({ data: { text: '按规格改写后的需求', presetId: 'spec' } })
+  await pending
+  assert.equal(harness.truth.draft, '按规格改写后的需求')
+  assert.equal(harness.view().menuOpen, false, '选完必须收起菜单')
+})
+await test('点主按钮不带 presetId（默认提示词路径不变）', async () => {
+  const network = installFetch({ presets: [{ id: 'spec', label: '转规格' }] })
+  const harness = mount({ draft: '草稿' })
+  harness.view()
+  await tick()
+  const pending = harness.view().optimize.props.onClick()
+  assert.deepEqual(network.optimizeCalls[0].body, { text: '草稿', sessionId: harness.sessionId })
+  network.respond({ data: { text: '改写后' } })
+  await pending
+})
+await test('没配预设 / 目录读失败：不渲染菜单按钮，主按钮照常可用', async () => {
+  const none = installFetch({ presets: [] })
+  const harness = mount({ draft: '草稿' })
+  harness.view()
+  await tick()
+  assert.equal(harness.view().presetToggle, null, '没配预设时视觉必须与从前一致')
+
+  const broken = installFetch({ failCatalog: true })
+  const other = mount({ draft: '草稿' })
+  other.view()
+  await tick()
+  assert.equal(other.view().presetToggle, null, '目录读失败也不能冒出一个空菜单')
+  const pending = other.view().optimize.props.onClick()
+  assert.equal(broken.optimizeCalls.length, 1, '主按钮不受目录失败影响')
+  broken.respond({ data: { text: '改写后' } })
+  await pending
+  assert.equal(other.truth.draft, '改写后')
+})
+await test('长度上限以宿主为准：本地先说清楚，不发请求', async () => {
+  const network = installFetch({
+    presets: [],
+    limits: {
+      maxInputChars: 5,
+      temperature: { min: 0, max: 2 },
+      maxOutputTokens: { min: 1, max: 1000 },
+      timeoutMs: { min: 1000, max: 60000 },
+    },
+  })
+  const harness = mount({ draft: '一二三四五六' })   // 6 字 > 上限 5
+  harness.view()
+  await tick()
+  await harness.view().optimize.props.onClick()
+  assert.equal(network.optimizeCalls.length, 0, '超长不该打到宿主')
+  const note = harness.view().noteText
+  assert.equal(note.includes('tooLong'), true)
+  assert.equal(note.includes('6/5'), true, '提示里要带实际字数与上限')
+  assert.equal(harness.view().noteTone, 'warn')
+})
+await test('设置页区间也走宿主下发：换一组 limits 立刻生效', async () => {
+  // 客户端的 `limits` 不再自带常量，而是 `/catalog` 的 limits（宿主 TEMPERATURE_RANGE 等）。
+  // 这里给一组更紧的区间，验证校验与输入框 min 都跟着走。
+  const page = mountSettings({
+    settingsValue: undefined,
+    catalog: {
+      namespace: SETTINGS_NAMESPACE,
+      settings: { available: true, section: {} },
+      providers: [],
+      limits: {
+        maxInputChars: 100,
+        temperature: { min: 0, max: 1 },
+        maxOutputTokens: { min: 1, max: 100 },
+        timeoutMs: { min: 2000, max: 5000 },
+      },
+      presets: [],
+      effective: { provider: null, model: null, temperature: null, maxOutputTokens: 1024, timeoutMs: 30000 },
+    },
+  })
+  page.view()
+  await tick()
+  let view = page.view()
+  assert.equal(view.inputs.get('maxOutputTokens').props.min, 1, '输入框 min 也要用宿主下发值')
+  assert.equal(view.inputs.get('timeoutMs').props.min, 2000)
+
+  view.inputs.get('maxOutputTokens').props.onChange({ target: { value: '101' } })   // > 100
+  view.inputs.get('timeoutMs').props.onChange({ target: { value: '6000' } })        // > 5000
+  view.inputs.get('temperature').props.onChange({ target: { value: '1.5' } })       // > 1
+  view = page.view()
+  await view.action('save').props.onClick()
+  assert.equal(page.scope.mutations.length, 0, '超宿主区间不得写入')
+  assert.deepEqual(page.view().errors, [
+    'settings.err.temperature',
+    'settings.err.maxOutputTokens',
+    'settings.err.timeoutMs',
+  ])
+
+  // 区间内必须放行（证明不是"一律拒绝"）。
+  const ok = mountSettings({
+    settingsValue: undefined,
+    catalog: {
+      namespace: SETTINGS_NAMESPACE,
+      settings: { available: true, section: {} },
+      providers: [],
+      limits: {
+        maxInputChars: 100,
+        temperature: { min: 0, max: 1 },
+        maxOutputTokens: { min: 1, max: 100 },
+        timeoutMs: { min: 2000, max: 5000 },
+      },
+      presets: [],
+      effective: { provider: null, model: null, temperature: null, maxOutputTokens: 1024, timeoutMs: 30000 },
+    },
+  })
+  ok.view()
+  await tick()
+  let okView = ok.view()
+  okView.inputs.get('maxOutputTokens').props.onChange({ target: { value: '100' } })
+  okView.inputs.get('timeoutMs').props.onChange({ target: { value: '5000' } })
+  okView = ok.view()
+  await okView.action('save').props.onClick()
+  assert.equal(ok.scope.mutations.length, 1, '边界值必须放行')
 })
 
 console.log('client half: P3 撤销栈')

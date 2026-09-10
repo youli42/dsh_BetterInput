@@ -182,6 +182,7 @@ function fakeCtx(options = {}) {
         // 真实 cordis 里 logger **不是** reflect 注册的服务，`ctx.get('logger')` 恒为 undefined。
         // 替身必须照抄这一点：否则"日志全部静默丢失"这类回归永远测不出来。
         if (serviceName === 'logger') return undefined
+        if (serviceName === 'connection') return options.connection
         if (serviceName === 'agentDefaultModel') {
           return options.selection === undefined ? undefined : { currentSelection: () => options.selection }
         }
@@ -498,6 +499,53 @@ await test('403：非环回来源 / 异源 Host / 跨站标记', async () => {
     assert.equal(result.json.error, 'forbidden')
   }
 })
+await test('信任判定优先交给框架的 connection.requestRejection（403/401/放行）', async () => {
+  const base = { chunks: TEXT_CHUNKS, selection: { provider: 'p', model: 'm' } }
+
+  // 1) 框架放行（浏览器带会话 cookie）→ 正常出结果。
+  const allowed = setup({}, { ...base, connection: { requestRejection: () => undefined } })
+  assert.equal((await drive(fakeRequest({ body: '{"text":"x"}' }))).status, 200)
+  assert.equal(allowed.calls.length, 1)
+
+  // 2) 框架 403（DNS rebinding / 异源 Host）→ 原样拒绝，且**不调用模型**。
+  const rebinding = setup({}, { ...base, connection: { requestRejection: () => 403 } })
+  const forbidden = await drive(fakeRequest({ body: '{"text":"x"}' }))
+  assert.equal(forbidden.status, 403)
+  assert.equal(forbidden.json.error, 'forbidden')
+  assert.equal(rebinding.calls.length, 0, '被围栏拒绝时绝不能触达模型')
+
+  // 3) 框架 401（围栏过了但缺浏览器会话）→ 能力路由必须挡住，并给出可操作提示。
+  const noSession = setup({}, { ...base, connection: { requestRejection: () => 401 } })
+  const unauthorized = await drive(fakeRequest({ body: '{"text":"x"}' }))
+  assert.equal(unauthorized.status, 401)
+  assert.equal(unauthorized.json.error, 'unauthorized')
+  assert.equal(unauthorized.json.message.includes('浏览器会话'), true)
+  assert.equal(noSession.calls.length, 0, '没有会话就不得花凭据')
+
+  // 4) 元数据路由（/catalog、/check）在**环回**客户端上免会话：保留 CLI 可排查性。
+  const metadata = setup({}, { ...base, connection: { requestRejection: () => 401 } })
+  const catalog = await drivePath(ROUTE_CATALOG, fakeRequest({ method: 'GET' }))
+  assert.equal(catalog.status, 200, '本机 curl 仍应能读目录（不花凭据）')
+  assert.equal((await drivePath(ROUTE_CHECK, fakeRequest({ method: 'POST', body: '{"provider":"p","model":"m"}' }))).status, 200)
+
+  // 5) 但**非环回**客户端即便只是读元数据也要被拒（LAN 客户端必须带会话）。
+  const lan = await drivePath(ROUTE_CATALOG, fakeRequest({ method: 'GET', remoteAddress: '10.1.2.3' }))
+  assert.equal(lan.status, 403)
+  assert.equal(metadata.routes.length, 4)
+})
+await test('connection 判定抛错时回落旧围栏（不是放行）', async () => {
+  const observations = setup({}, {
+    chunks: TEXT_CHUNKS,
+    selection: { provider: 'p', model: 'm' },
+    connection: {
+      requestRejection() { throw new Error('connection exploded') },
+    },
+  })
+  assert.equal((await drive(fakeRequest({ body: '{"text":"x"}' }))).status, 200, '环回客户端照常')
+  assert.equal((await drive(fakeRequest({ remoteAddress: '10.1.2.3', body: '{"text":"x"}' }))).status, 403, '非环回仍拒')
+  const warn = observations.logs.find(entry => String(entry.format).includes('requestRejection failed'))
+  assert.ok(warn !== undefined, '回落必须留日志（否则安全策略悄悄降级没人知道）')
+})
 await test('405 非 POST；400 空草稿/超长/坏 JSON；413 超大体积', async () => {
   setup({ maxInputChars: 5 }, { chunks: TEXT_CHUNKS, selection: { provider: 'p', model: 'm' } })
   assert.equal((await drive(fakeRequest({ method: 'GET' }))).status, 405)
@@ -654,6 +702,30 @@ await test('settings 服务消失后回到降级态（注册是子 fiber 上的 
 })
 
 console.log('settings: 设置项驱动实际请求')
+await test('catalog 下发客户端需要的规则与预设（单一事实来源）', async () => {
+  const config = {
+    maxInputChars: 1234,
+    presets: [
+      { id: 'concise', label: '精简', prompt: '压缩篇幅' },
+      { id: 'spec', prompt: '转规格' },          // 没写 label 时回落到 id
+    ],
+  }
+  setup(config, { chunks: TEXT_CHUNKS, selection: { provider: 'p', model: 'm' } })
+  const catalog = await drivePath(ROUTE_CATALOG, fakeRequest({ method: 'GET' }))
+
+  // 区间：客户端不再自己维护镜像，校验/输入框 min 都以这里为准。
+  assert.equal(catalog.json.limits.maxInputChars, 1234)
+  assert.deepEqual(catalog.json.limits.temperature, { min: 0, max: 2 })
+  assert.deepEqual(catalog.json.limits.maxOutputTokens, { min: 1, max: 200000 })
+  assert.deepEqual(catalog.json.limits.timeoutMs, { min: 1000, max: 600000 })
+
+  // 预设：只给 id/label —— prompt 留在宿主，客户端不需要也不该看到它。
+  assert.deepEqual(catalog.json.presets, [
+    { id: 'concise', label: '精简' },
+    { id: 'spec', label: 'spec' },
+  ])
+  assert.equal(JSON.stringify(catalog.json).includes('压缩篇幅'), false, 'prompt 绝不能下发')
+})
 await test('保存后的模型/提示词/参数就是后续请求用的那套', async () => {
   const observations = setup({}, {
     chunks: TEXT_CHUNKS,
