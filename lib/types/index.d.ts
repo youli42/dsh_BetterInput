@@ -54,11 +54,11 @@ export interface Config {
   presets?: ReadonlyArray<{ id: string, label?: string, prompt: string }>
   /** 输入字数上限。 @default 8000 */
   maxInputChars?: number
-  /** 输出 token 上限。 @default 1024 */
+  /** 输出 token 上限（1..200000）。 @default 1024 */
   maxOutputTokens?: number
-  /** 单次调用超时（毫秒）。 @default 30000 */
+  /** 单次调用超时（毫秒，1000..600000）。 @default 30000 */
   timeoutMs?: number
-  /** 采样温度（缺省不传，由适配器决定）。 */
+  /** 采样温度（0..2；缺省不传，由适配器决定）。 */
   temperature?: number
 }
 

@@ -43,7 +43,7 @@
   "scripts": {
     "link-deps": "node scripts/link-dev-deps.mjs",
     "pretest": "node scripts/link-dev-deps.mjs",
-    "test": "node test/smoke.mjs && node test/client.smoke.mjs"
+    "test": "node test/smoke.mjs && node test/client.smoke.mjs && node test/settings-activation.mjs"
   },
   "peerDependencies": {
     "react": "^18.2.0",
