@@ -225,14 +225,57 @@ function fakeCtx(options = {}) {
 /**
  * 装一个可手动结算的 fetch 替身。
  *
- * 注意：输入框按钮挂载时会读一次 `/catalog`（拿预设与区间），所以 **GET /catalog 立即结算**，
- * 只有 POST /optimize 才是可悬挂、可手动结算的那一条——否则"取消/悬挂"类用例会被这次读目录搅乱。
- * @param {{ presets?: object[], limits?: object, catalog?: object, failCatalog?: boolean }} [options] - 目录响应。
- * @returns {object} 门面：calls / pendingCount / respond / fail。
+ * 覆盖三条路径：
+ *   · `GET /catalog` → 立即结算（预设/区间）；
+ *   · `POST /optimize/stream` → 默认**回 404**，于是所有既有用例都在测"回退到一次性 JSON"这条路；
+ *     传 `{ streaming: true }` 时改为返回一个**可控 SSE 流**（`facade.stream`），用来测流式回填；
+ *   · `POST /optimize` → 可悬挂、可手动结算、可取消（原行为）。
+ *
+ * `respond({data})` 会结算"当前待结算的请求"；若此刻还没有请求（例如流式刚拿到 404、回退请求还没发出），
+ * 就先**记下来**等下一个 POST 请求到达时自动结算——否则用例得依赖微任务时序，很脆。
+ * @param {{ presets?: object[], limits?: object, catalog?: object, failCatalog?: boolean, streaming?: boolean }} [options] - 替身参数。
+ * @returns {object} 门面：calls / optimizeCalls / catalogCalls / pendingCount / respond / fail / stream。
  */
 function installFetch(options = {}) {
   const calls = []
   const entries = []
+  const encoder = new TextEncoder()
+  /** 已记下但还没发出的响应（见上面 respond 的说明）。 */
+  let armed
+  /** 流式响应状态：controller 非空表示客户端已经拿到流。 */
+  const streamState = { controller: undefined, closed: false }
+
+  /**
+   * 结算一个条目（只允许一次）。
+   * @param {object} entry - 条目。
+   * @param {object} response - 响应内容 `{ status, data, error }`。
+   * @returns {void}
+   */
+  const settleEntry = (entry, response) => {
+    // 注意：**不要**在这里先置 `entry.settled`——`entry.resolve/reject` 内部会检查它并自己是幂等的，
+    // 先置会导致"看起来结算了、其实 promise 永远挂着"。
+    if (entry.settled) return
+    if (response.error !== undefined) {
+      entry.reject(response.error)
+      return
+    }
+    const status = response.status ?? 200
+    if (entry.kind === 'stream') {
+      // 非 2xx：按"路由层面失败"结算，客户端会走它自己的状态码分支（与 JSON 路径一致）。
+      if (status >= 300) {
+        entry.resolve({ ok: false, status, json: async () => response.data ?? {} })
+        return
+      }
+      // 2xx：默认只发 `done` 帧（等价于"模型一口气给完"），需要增量请用 facade.stream.push(...)。
+      streamState.controller?.enqueue(encoder.encode(`event: done\ndata: ${JSON.stringify(response.data ?? {})}\n\n`))
+      streamState.controller?.close()
+      streamState.closed = true
+      entry.resolve({ ok: true, status: 200, body: entry.body })
+      return
+    }
+    entry.resolve({ ok: status >= 200 && status < 300, status, json: async () => response.data ?? {} })
+  }
+
   globalThis.fetch = (url, init) => {
     const record = {
       url,
@@ -241,9 +284,8 @@ function installFetch(options = {}) {
       body: init?.body === undefined ? undefined : JSON.parse(init.body),
     }
     calls.push(record)
-    const isCatalog = url === ROUTE_CATALOG
-    const data = isCatalog
-      ? options.catalog ?? {
+    if (url === ROUTE_CATALOG) {
+      const data = options.catalog ?? {
         namespace: SETTINGS_NAMESPACE,
         settings: { available: true, section: {} },
         providers: [],
@@ -256,14 +298,18 @@ function installFetch(options = {}) {
         presets: options.presets ?? [],
         effective: { provider: null, model: null, temperature: null, maxOutputTokens: 1024, timeoutMs: 30000 },
       }
-      : undefined
-    if (isCatalog) {
       const status = options.failCatalog === true ? 500 : 200
       return Promise.resolve({ ok: status === 200, status, json: async () => data })
     }
+    if (url === ROUTE_STREAM && options.streaming === false) {
+      // 模拟"旧宿主/不支持流式"：这条路由不存在（404），客户端应回退到一次性 JSON。
+      return Promise.resolve({ ok: false, status: 404, json: async () => ({}) })
+    }
+
     return new Promise((resolve, reject) => {
       /** 只允许结算一次，并记录已结算（取消也走这里）。 */
       const entry = {
+        kind: url === ROUTE_STREAM ? 'stream' : 'json',
         settled: false,
         settle: (settleWith, value) => {
           if (entry.settled) return
@@ -273,42 +319,121 @@ function installFetch(options = {}) {
       }
       entries.push(entry)
       if (init?.signal !== undefined) {
-        const onAbort = () => entry.settle(reject, new DOMException('aborted', 'AbortError'))
+        const onAbort = () => {
+          if (entry.kind === 'stream' && entry.settled) {
+            // 真实 fetch 在 signal 中止时会取消 body：让客户端的 `reader.read()` 立刻结束
+            // （否则它会一直等下一个 chunk，取消用例就永远挂着）。
+            streamState.controller?.error(new DOMException('aborted', 'AbortError'))
+            streamState.closed = true
+            return
+          }
+          entry.settle(reject, new DOMException('aborted', 'AbortError'))
+        }
         if (init.signal.aborted) onAbort()
         else init.signal.addEventListener('abort', onAbort)
       }
       entry.resolve = (value) => entry.settle(resolve, value)
       entry.reject = (error) => entry.settle(reject, error)
+      if (entry.kind === 'stream') {
+        entry.body = new ReadableStream({
+          start(controller) { streamState.controller = controller },
+        })
+        streamState.entry = entry
+      }
+      if (armed !== undefined) {
+        const pending = armed
+        armed = undefined
+        settleEntry(entry, pending)
+      }
     })
   }
-  /** 取最后一个未结算的请求条目。 */
-  const pendingEntry = () => {
-    const last = entries.findLast(item => !item.settled)
-    assert.ok(last !== undefined, '没有待结算的请求')
-    return last
+
+  /**
+   * 打开流式响应：手工喂帧前必须先让 `fetch` 结算，否则客户端还在 `await fetch(...)`，根本不会去读流。
+   * @returns {void}
+   */
+  const openStream = () => {
+    const entry = streamState.entry
+    assert.ok(entry !== undefined, '客户端还没发出流式请求（先点击优化）')
+    if (!entry.settled) entry.resolve({ ok: true, status: 200, body: entry.body })
   }
+
   return {
     calls,
-    /** 只看优化请求（排除挂载时那次 GET /catalog），用例断言基本都用它。 */
+    /**
+     * 所有"发起优化"的 POST（流式或回退的 JSON）。
+     * 多数用例只关心"发了一次、请求体是什么"，不该绑死在具体走哪条路由上——那是路由选择用例的事。
+     */
+    get postCalls() { return calls.filter(call => call.method === 'POST' && (call.url === ROUTE || call.url === ROUTE_STREAM)) },
+    /** 只看一次性 JSON 优化请求（回退路径）。 */
     get optimizeCalls() { return calls.filter(call => call.method === 'POST' && call.url === ROUTE) },
+    /** 只看流式请求。 */
+    get streamCalls() { return calls.filter(call => call.method === 'POST' && call.url === ROUTE_STREAM) },
     get catalogCalls() { return calls.filter(call => call.url === ROUTE_CATALOG) },
     get pendingCount() { return entries.filter(item => !item.settled).length },
     /**
-     * 结算最后一次请求。
+     * 流式控制器：手工喂帧（`push` 发一个 delta；`done` / `error` 收尾；`raw` 发任意文本）。
+     * 只有 `{ streaming: true }` 时才有实际作用。
+     */
+    stream: {
+      /** 发一个文本增量（会先"打开响应"，让客户端开始读流）。 */
+      push(text) {
+        openStream()
+        streamState.controller.enqueue(encoder.encode(`event: delta\ndata: ${JSON.stringify({ text })}\n\n`))
+      },
+      /** 发任意原始帧文本（用于测解析器容错，例如注释帧/坏 JSON）。 */
+      raw(text) {
+        openStream()
+        streamState.controller.enqueue(encoder.encode(text))
+      },
+      /** 正常收尾：done 帧 + 关闭。 */
+      done(data) {
+        openStream()
+        streamState.controller.enqueue(encoder.encode(`event: done\ndata: ${JSON.stringify(data)}\n\n`))
+        streamState.controller.close()
+        streamState.closed = true
+      },
+      /** 异常收尾：error 帧 + 关闭。 */
+      error(data) {
+        openStream()
+        streamState.controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify(data)}\n\n`))
+        streamState.controller.close()
+        streamState.closed = true
+      },
+      /** 直接掐断流（模拟网络中断）。 */
+      break() {
+        openStream()
+        streamState.controller.error(new TypeError('stream broken'))
+        streamState.closed = true
+      },
+      get closed() { return streamState.closed },
+    },
+    /**
+     * 结算"当前待结算的请求"；此刻还没有请求时先记下来，等下一个 POST 请求到达再自动结算
+     * （流式拿到 404 之后回退请求是下一个微任务才发出的，用例不该依赖这个时序）。
      * @param {{ status?: number, data?: unknown }} options - 响应内容。
      * @returns {void}
      */
     respond(options = {}) {
-      const status = options.status ?? 200
-      pendingEntry().resolve({ ok: status >= 200 && status < 300, status, json: async () => options.data ?? {} })
+      const pending = entries.findLast(item => !item.settled)
+      if (pending === undefined) {
+        armed = { status: options.status, data: options.data }
+        return
+      }
+      settleEntry(pending, { status: options.status, data: options.data })
     },
     /**
-     * 让最后一次请求抛错（网络层失败）。
+     * 让最后一次请求抛错（网络层失败）；语义与 `respond` 相同（没有待结算请求时先记下）。
      * @param {Error} error - 抛出的错误。
      * @returns {void}
      */
     fail(error) {
-      pendingEntry().reject(error)
+      const pending = entries.findLast(item => !item.settled)
+      if (pending === undefined) {
+        armed = { error }
+        return
+      }
+      settleEntry(pending, { error })
     },
   }
 }
@@ -327,6 +452,9 @@ const nextSessionId = () => `session-${String(++sessionCounter)}`
 async function tick(rounds = 6) {
   for (let index = 0; index < rounds; index += 1) await Promise.resolve()
 }
+
+/** 跑到宏任务边界：流式读取（`reader.read()` → 解析 → 写回）跨多个微任务，光靠 tick 不够。 */
+const flush = async () => { await new Promise(resolve => setImmediate(resolve)) }
 
 /**
  * 递归收集带某个 props 键的元素（预设菜单项嵌在 div 里，不是包裹节点的直接子元素）。
@@ -387,9 +515,20 @@ function mount(options = {}) {
   const component = composerEntry.component
   const written = []
 
-  /** 渲染一次：从真值生成新快照（模拟框架给组件的会话标准道具）。 */
+  /**
+   * 渲染一次：从真值生成快照（模拟框架给组件的会话标准道具）。
+   *
+   * 快照字段用 **getter 读真值**，而不是一次性拷贝：真实框架里输入机的任何变化都会让组件重渲染、
+   * 于是组件在异步路径上读到的 `live.current.input.draft` 总是新的；而这里的"重渲染"只在测试显式
+   * 调用 `view()` 时发生。若快照是死拷贝，"我们自己刚写进去的草稿"就会在组件眼里显得是用户手改。
+   */
   const view = () => {
-    const snapshot = { ...truth, occurrences: [...truth.occurrences] }
+    const snapshot = {
+      get draft() { return truth.draft },
+      get draftRev() { return truth.draftRev },
+      get phase() { return truth.phase },
+      get occurrences() { return [...truth.occurrences] },
+    }
     const props = {
       t: (key) => key,
       useInput: (selector) => selector(snapshot),
@@ -446,6 +585,7 @@ function mount(options = {}) {
 
 const SEAT = 'conversation.input.right'
 const ROUTE = '/api/dsh-input-optimizer/optimize'
+const ROUTE_STREAM = '/api/dsh-input-optimizer/optimize/stream'
 const ROUTE_CATALOG = '/api/dsh-input-optimizer/catalog'
 const ROUTE_CATALOG_MODELS = '/api/dsh-input-optimizer/catalog/models'
 const ROUTE_CHECK = '/api/dsh-input-optimizer/check'
@@ -627,8 +767,8 @@ await test('无 owner props 时读取全走 useInput，点击不抛错', async (
   // 组件渲染只依赖 useInput / inputActions / sessionId / t
   assert.equal(view.optimize.props.disabled, false)
   const pending = view.optimize.props.onClick()   // 同步段不得抛错（旧版曾在此读 props.input.phase）
-  assert.equal(network.optimizeCalls.length, 1)
-  assert.deepEqual(network.optimizeCalls[0].body, { text: '我的草稿', sessionId: harness.sessionId })
+  assert.equal(network.postCalls.length, 1)
+  assert.deepEqual(network.postCalls[0].body, { text: '我的草稿', sessionId: harness.sessionId })
   network.respond({ data: { text: '优化后的草稿' } })
   await pending
   assert.deepEqual(harness.written, ['优化后的草稿'])
@@ -650,11 +790,11 @@ await test('成功路径：POST 到宿主路由并 setDraft，随后出现撤销
   const network = installFetch()
   const harness = mount({ draft: '帮我写个脚本' })
   const pending = harness.view().optimize.props.onClick()
-  assert.equal(network.optimizeCalls.length, 1)
-  assert.equal(network.optimizeCalls[0].url, ROUTE)
-  assert.equal(network.optimizeCalls[0].method, 'POST')
-  assert.equal(network.optimizeCalls[0].headers['content-type'], 'application/json')
-  assert.deepEqual(network.optimizeCalls[0].body, { text: '帮我写个脚本', sessionId: harness.sessionId })
+  assert.equal(network.postCalls.length, 1)
+  assert.equal(network.postCalls[0].url, ROUTE_STREAM, '默认走流式路由')
+  assert.equal(network.postCalls[0].method, 'POST')
+  assert.equal(network.postCalls[0].headers['content-type'], 'application/json')
+  assert.deepEqual(network.postCalls[0].body, { text: '帮我写个脚本', sessionId: harness.sessionId })
 
   network.respond({ data: { text: '请把脚本改写成……' } })
   await pending
@@ -732,34 +872,44 @@ await test('宿主错误：优先展示宿主 message；403/404/405 有专门文
   await pendingBare
   assert.equal(bareSession.view().noteText, 'unauthorized')
 
-  const missing = installFetch()
+  /**
+   * 404/405：这两条是"宿主半没挂载"的语义，属于**回退路径**（旧宿主没有流式路由时同样如此）——
+   * 所以用 `streaming: false` 让流式请求先拿到 404、回退到一次性 JSON，再给 JSON 请求应答。
+   */
+  const missing = installFetch({ streaming: false })
   const third = mount({ draft: 'x' })
   const pendingThree = third.view().optimize.props.onClick()
+  await tick()                       // 等回退请求真正发出去
   missing.respond({ status: 404, data: null })
   await pendingThree
   assert.equal(third.view().noteText, 'notMounted')
 
   // 真机上宿主半没挂载时 POST 拿到的是 **405 空体**（SPA fallback 先拦非 GET/HEAD，
   // 再去找文件），所以 405 必须和 404 一样映射到「路由未挂载」。
-  const unmounted = installFetch()
+  const unmounted = installFetch({ streaming: false })
   const fourth = mount({ draft: 'x' })
   const pendingFour = fourth.view().optimize.props.onClick()
+  await tick()
   unmounted.respond({ status: 405, data: null })
   await pendingFour
   assert.equal(fourth.view().noteText, 'notMounted')
 
   // 插件自己的 405 带 JSON message（"只接受 POST"），必须优先展示它而不是兜底文案。
-  const methodNotAllowed = installFetch()
+  // （同样走回退路径：对 POST 而言流式路由回 405 = 这条路由不归它管。）
+  const methodNotAllowed = installFetch({ streaming: false })
   const fifth = mount({ draft: 'x' })
   const pendingFive = fifth.view().optimize.props.onClick()
+  await tick()
   methodNotAllowed.respond({ status: 405, data: { error: 'method-not-allowed', message: '只接受 POST' } })
   await pendingFive
   assert.equal(fifth.view().noteText, '只接受 POST')
 })
 await test('网络失败与空结果都有可读文案，且不入栈', async () => {
-  const network = installFetch()
+  // 网络层失败：流式这条路也失败，回退到 JSON 再失败一次 → 最终文案是"网络失败"。
+  const network = installFetch({ streaming: false })
   const harness = mount({ draft: 'x' })
   const pending = harness.view().optimize.props.onClick()
+  await tick()
   network.fail(new TypeError('Failed to fetch'))
   await pending
   assert.equal(harness.view().noteText, 'network')
@@ -786,7 +936,7 @@ await test('草稿含芯片时拒绝发请求（整体替换会丢引用）', as
   const harness = mount({ draft: '看下 @a.ts' })
   harness.setOccurrences([{ occurrenceId: 1 }])
   await harness.view().optimize.props.onClick()
-  assert.equal(network.optimizeCalls.length, 0, '不得发起请求')
+  assert.equal(network.postCalls.length, 0, '不得发起请求')
   assert.equal(harness.view().noteText, 'chips')
   assert.deepEqual(harness.written, [])
 })
@@ -810,7 +960,7 @@ await test('宿主配了预设：菜单按钮出现，选中后请求带 presetI
   assert.deepEqual(view.presetItems.map(item => childrenOf(item)[0]), ['精简', '转规格'])
 
   const pending = view.presetItems[1].props.onClick()
-  assert.deepEqual(network.optimizeCalls[0].body, {
+  assert.deepEqual(network.postCalls[0].body, {
     text: '帮我写个爬虫',
     sessionId: harness.sessionId,
     presetId: 'spec',
@@ -826,7 +976,7 @@ await test('点主按钮不带 presetId（默认提示词路径不变）', async
   harness.view()
   await tick()
   const pending = harness.view().optimize.props.onClick()
-  assert.deepEqual(network.optimizeCalls[0].body, { text: '草稿', sessionId: harness.sessionId })
+  assert.deepEqual(network.postCalls[0].body, { text: '草稿', sessionId: harness.sessionId })
   network.respond({ data: { text: '改写后' } })
   await pending
 })
@@ -843,7 +993,7 @@ await test('没配预设 / 目录读失败：不渲染菜单按钮，主按钮�
   await tick()
   assert.equal(other.view().presetToggle, null, '目录读失败也不能冒出一个空菜单')
   const pending = other.view().optimize.props.onClick()
-  assert.equal(broken.optimizeCalls.length, 1, '主按钮不受目录失败影响')
+  assert.equal(broken.postCalls.length, 1, '主按钮不受目录失败影响')
   broken.respond({ data: { text: '改写后' } })
   await pending
   assert.equal(other.truth.draft, '改写后')
@@ -862,7 +1012,7 @@ await test('长度上限以宿主为准：本地先说清楚，不发请求', as
   harness.view()
   await tick()
   await harness.view().optimize.props.onClick()
-  assert.equal(network.optimizeCalls.length, 0, '超长不该打到宿主')
+  assert.equal(network.postCalls.length, 0, '超长不该打到宿主')
   const note = harness.view().noteText
   assert.equal(note.includes('tooLong'), true)
   assert.equal(note.includes('6/5'), true, '提示里要带实际字数与上限')
@@ -1043,6 +1193,107 @@ await test('不同会话的撤销栈互不干扰', async () => {
   await first.view().undo.props.onClick()
   assert.equal(first.truth.draft, 'A 会话原文')
   assert.equal(second.truth.draft, 'B 会话原文')
+})
+
+console.log('client half: 流式回填（P5.6）')
+await test('增量边到边写（节流），最终以 done 帧的文本为准，只压一条撤销记录', async () => {
+  const network = installFetch({ streaming: true })
+  const harness = mount({ draft: '原文' })
+  const pending = harness.view().optimize.props.onClick()
+  assert.equal(network.streamCalls.length, 1, '默认走流式路由')
+
+  // 同一个 tick 内连发三个增量：节流生效 → 只写一次（第一次），其余先攒着。
+  network.stream.push('改写')
+  network.stream.push('后的')
+  network.stream.push('文本')
+  await flush()
+  assert.deepEqual(harness.written, ['改写'], '节流：同一 tick 内只写一次')
+
+  // done 帧的文本与增量拼接不同（例如宿主做了 trim/规范化）→ 最终必须写 done 的文本。
+  network.stream.done({ text: '改写后的文本（规范化）', modelUsed: { provider: 'p', model: 'm' } })
+  await pending
+  assert.deepEqual(harness.written, ['改写', '改写后的文本（规范化）'])
+  assert.equal(harness.truth.draft, '改写后的文本（规范化）')
+  assert.equal(harness.view().noteText, 'done')
+  assert.notEqual(harness.view().undo, null, '成功后才出现撤销按钮')
+
+  // 只有一条撤销记录：一次撤销直接回到原文。
+  await harness.view().undo.props.onClick()
+  assert.equal(harness.truth.draft, '原文')
+  assert.equal(harness.view().undo, null)
+})
+await test('用户在流式中途手改 → 立刻中止、不覆盖、给 staleResult 提示', async () => {
+  const network = installFetch({ streaming: true })
+  const harness = mount({ draft: '原文' })
+  const pending = harness.view().optimize.props.onClick()
+
+  network.stream.push('改写')
+  await flush()
+  assert.deepEqual(harness.written, ['改写'])
+
+  harness.type('用户插话')     // 用户开始打字
+  harness.view()               // 框架把新快照推给组件
+  network.stream.push('后的文本')
+  await flush()
+  assert.deepEqual(harness.written, ['改写'], '检测到用户改动后不得再写')
+
+  network.stream.done({ text: '改写后的文本' })
+  await pending
+  assert.equal(harness.truth.draft, '用户插话', '绝不能覆盖用户此刻的输入')
+  assert.equal(harness.view().noteText, 'staleResult')
+  assert.equal(harness.view().noteTone, 'warn')
+  assert.equal(harness.view().undo, null)
+})
+await test('流中途 error 帧 → 还原原文并说明（不留半截草稿）', async () => {
+  const network = installFetch({ streaming: true })
+  const harness = mount({ draft: '原文' })
+  const pending = harness.view().optimize.props.onClick()
+  network.stream.push('半截结果')
+  await flush()
+  network.stream.error({ error: 'model-failed', message: '上游炸了' })
+  await pending
+  assert.equal(harness.truth.draft, '原文', '已写入的增量必须还原')
+  assert.equal(harness.written.at(-1), '原文')
+  assert.equal(harness.view().noteText, '上游炸了（streamReverted）')
+  assert.equal(harness.view().noteTone, 'error')
+  assert.equal(harness.view().undo, null, '失败不入撤销栈')
+})
+await test('流被掐断（网络中断）→ 同样还原原文并提示失败', async () => {
+  const network = installFetch({ streaming: true })
+  const harness = mount({ draft: '原文' })
+  const pending = harness.view().optimize.props.onClick()
+  network.stream.push('半截')
+  await flush()
+  network.stream.break()
+  await pending
+  assert.equal(harness.truth.draft, '原文')
+  assert.equal(harness.view().noteText, 'fail')
+  assert.equal(harness.view().noteTone, 'error')
+})
+await test('旧宿主没有流式路由 → 自动回退一次性 JSON，行为与从前一致', async () => {
+  const network = installFetch({ streaming: false })
+  const harness = mount({ draft: '原文' })
+  const pending = harness.view().optimize.props.onClick()
+  await flush()
+  assert.equal(network.streamCalls.length, 1, '先试过流式')
+  assert.equal(network.optimizeCalls.length, 1, '再回退到 JSON')
+  network.respond({ data: { text: '优化后' } })
+  await pending
+  assert.deepEqual(harness.written, ['优化后'], '回退路径不得留下流式的半截痕迹')
+  assert.equal(harness.view().noteText, 'done')
+  assert.notEqual(harness.view().undo, null)
+})
+await test('流式中途取消 → 不写、不提示失败、回到 idle', async () => {
+  const network = installFetch({ streaming: true })
+  const harness = mount({ draft: '原文' })
+  const running = harness.view().optimize.props.onClick()
+  network.stream.push('改写')
+  await flush()
+  await harness.view().optimize.props.onClick()   // 生成中再点 = 取消
+  await running
+  assert.equal(harness.view().optimize.props['data-state'], 'idle')
+  assert.equal(harness.view().noteText, null, '取消不该弹失败提示')
+  assert.equal(harness.view().undo, null)
 })
 
 console.log('client half: 设置页')
