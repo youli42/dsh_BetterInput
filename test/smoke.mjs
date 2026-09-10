@@ -238,6 +238,9 @@ function fakeCtx(options = {}) {
   }
 }
 
+/** 让一条已开始的请求推进到"停在 stream 上"的状态（并发用例需要它制造重叠）。 */
+const flush = async () => { await new Promise(resolve => setImmediate(resolve)) }
+
 /** 最近一次 apply 注册的路由（由 setup 填充）。 */
 let boundRoute
 
@@ -545,6 +548,51 @@ await test('connection 判定抛错时回落旧围栏（不是放行）', async 
   assert.equal((await drive(fakeRequest({ remoteAddress: '10.1.2.3', body: '{"text":"x"}' }))).status, 403, '非环回仍拒')
   const warn = observations.logs.find(entry => String(entry.format).includes('requestRejection failed'))
   assert.ok(warn !== undefined, '回落必须留日志（否则安全策略悄悄降级没人知道）')
+})
+await test('并发闸门：同会话单航班 409、全局上限 429、结束后释放', async () => {
+  const observations = setup({ maxConcurrentCalls: 2 }, {
+    chunks: TEXT_CHUNKS,
+    delayMs: 40,
+    selection: { provider: 'p', model: 'm' },
+  })
+
+  // 第一条占住 s1（不 await，让它停在 stream 上）。
+  const first = drive(fakeRequest({ body: '{"text":"a","sessionId":"s1"}' }))
+  await flush()
+  const sameSession = await drive(fakeRequest({ body: '{"text":"b","sessionId":"s1"}' }))
+  assert.equal(sameSession.status, 409, '同一会话不允许并发')
+  assert.equal(sameSession.json.error, 'busy-session')
+  assert.equal(sameSession.json.message.includes('已经在优化中'), true)
+
+  // 换个会话占满第 2 个名额，再来第三条就被全局上限挡住。
+  const second = drive(fakeRequest({ body: '{"text":"c","sessionId":"s2"}' }))
+  await flush()
+  const saturated = await drive(fakeRequest({ body: '{"text":"d","sessionId":"s3"}' }))
+  assert.equal(saturated.status, 429)
+  assert.equal(saturated.json.error, 'too-many-requests')
+  assert.equal(saturated.json.message.includes('2'), true, '提示里要带上限值')
+
+  const settled = await Promise.all([first, second])
+  assert.deepEqual(settled.map(item => item.status), [200, 200])
+  assert.equal(observations.calls.length, 2, '被拒的请求绝不能触达模型（不花钱）')
+
+  // 名额必须被释放：否则几次取消/失败之后整个插件就"锁死"了。
+  const after = await drive(fakeRequest({ body: '{"text":"e","sessionId":"s1"}' }))
+  assert.equal(after.status, 200, '请求结束后名额必须归还')
+  assert.equal(observations.calls.length, 3)
+})
+await test('失败/超时路径也要释放名额', async () => {
+  const failing = setup({}, { fail: new Error('provider exploded'), selection: { provider: 'p', model: 'm' } })
+  assert.equal((await drive(fakeRequest({ body: '{"text":"x","sessionId":"s1"}' }))).status, 502)
+  assert.equal((await drive(fakeRequest({ body: '{"text":"x","sessionId":"s1"}' }))).status, 502, '模型失败后名额要归还（否则 409）')
+  assert.equal(failing.calls.length, 2)
+})
+await test('maxConcurrentCalls 取值域校验与默认值', () => {
+  assert.equal(resolveConfig(undefined).maxConcurrentCalls, 4)
+  assert.equal(resolveConfig({ maxConcurrentCalls: 1 }).maxConcurrentCalls, 1)
+  assert.equal(resolveConfig({ maxConcurrentCalls: 64 }).maxConcurrentCalls, 64)
+  assert.throws(() => resolveConfig({ maxConcurrentCalls: 0 }), /positive integer/)
+  assert.throws(() => resolveConfig({ maxConcurrentCalls: 65 }), /maxConcurrentCalls must be within 1\.\.64/)
 })
 await test('405 非 POST；400 空草稿/超长/坏 JSON；413 超大体积', async () => {
   setup({ maxInputChars: 5 }, { chunks: TEXT_CHUNKS, selection: { provider: 'p', model: 'm' } })
