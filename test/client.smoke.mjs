@@ -66,7 +66,9 @@ const fakeReact = {
    */
   useEffect(effect, deps) {
     const index = cursor++
-    const slot = hookSlots[index] ??= { deps: undefined, cleanup: undefined }
+    // 注意别写成 `hookSlots[index] ??= {...}`：那属于"赋值出现在表达式里"，语义上也没必要。
+    if (hookSlots[index] === undefined) hookSlots[index] = { deps: undefined, cleanup: undefined }
+    const slot = hookSlots[index]
     const previous = slot.deps
     const changed = deps === undefined || previous === undefined || deps.length !== previous.length
       || deps.some((value, position) => value !== previous[position])
@@ -829,7 +831,7 @@ await test('点主按钮不带 presetId（默认提示词路径不变）', async
   await pending
 })
 await test('没配预设 / 目录读失败：不渲染菜单按钮，主按钮照常可用', async () => {
-  const none = installFetch({ presets: [] })
+  installFetch({ presets: [] })   // 全局 fetch 替身：目录返回"没有预设"
   const harness = mount({ draft: '草稿' })
   harness.view()
   await tick()

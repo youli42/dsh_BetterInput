@@ -51,7 +51,7 @@ function writableParent() {
       mkdirSync(candidate, { recursive: true })
       return candidate
     } catch {
-      continue
+      // 这个位置不可写，试下一个（两个都不行就返回 undefined → 整条套件 SKIP）。
     }
   }
   return undefined
