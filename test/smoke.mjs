@@ -16,10 +16,12 @@ import {
   ROUTE_CHECK,
   ROUTE_STREAM,
   SETTINGS_NAMESPACE,
+  STYLE_IDS,
   effectiveConfig,
   isIPv4Loopback,
   isLoopbackAddress,
   isLoopbackRequest,
+  parseStyleIds,
   resolveConfig,
   systemPromptFor,
   validateSettingsSection,
@@ -1112,6 +1114,120 @@ await test('闸门不再泄漏：占位后抛错的路径（未知预设 / 没�
   const second = await drive(fakeRequest({ body: '{"text":"x"}' }))
   assert.equal(second.status, 502, '第二次仍应是 502，而不是被泄漏的名额挡成 409')
   assert.equal(second.json.error, 'no-model-route')
+})
+
+console.log('host half: 多选优化风格（P6.1）')
+await test('styleIds 校验：去重、非数组/非字符串/未知 id 都 fail loud', () => {
+  assert.deepEqual(parseStyleIds(undefined), [])
+  assert.deepEqual(parseStyleIds([]), [])
+  assert.deepEqual(parseStyleIds(['concise']), ['concise'])
+  // 重复按幂等去重（多选控件重复选中是无意义输入，不该报错）。
+  assert.deepEqual(parseStyleIds(['spec', 'concise', 'spec']), ['spec', 'concise'])
+  assert.throws(() => parseStyleIds('concise'), error => error.code === 'bad-request' && error.status === 400)
+  assert.throws(() => parseStyleIds(['']), error => error.code === 'bad-request')
+  assert.throws(() => parseStyleIds([1]), error => error.code === 'bad-request')
+  // 未知风格必须 400：静默忽略会让用户以为风格生效了。
+  assert.throws(
+    () => parseStyleIds(['nope']),
+    error => error.code === 'unknown-style' && error.status === 400 && error.message.includes('nope'),
+  )
+  assert.deepEqual(STYLE_IDS, ['concise', 'spec'])
+})
+await test('内置风格：提示词三层覆盖（内置 ← 组合配置同 id 预设 ← 设置页）', () => {
+  // 1) 什么都没配 → 内置默认，且两个风格都可用。
+  const bare = effectiveConfig(resolveConfig({}), undefined)
+  assert.deepEqual(bare.styles.map(style => [style.id, style.source]),
+    [['concise', 'default'], ['spec', 'default']])
+  assert.equal(bare.styles[0].prompt.includes('压缩篇幅'), true, '内置默认提示词必须可用')
+
+  // 2) 老部署把风格提示词写在 config.presets 里 → 行为与升级前一字不差。
+  const fromConfig = effectiveConfig(
+    resolveConfig({ presets: [{ id: 'concise', label: '精简', prompt: '压缩篇幅' }] }),
+    undefined,
+  )
+  assert.equal(fromConfig.styles[0].source, 'config')
+  assert.equal(fromConfig.styles[0].prompt, '压缩篇幅')
+
+  // 3) 设置页的值优先级最高，且**只影响被覆盖的那一个风格**。
+  const fromSettings = effectiveConfig(
+    resolveConfig({ presets: [{ id: 'concise', label: '精简', prompt: '压缩篇幅' }] }),
+    { stylePromptConcise: '再短一点' },
+  )
+  assert.deepEqual(fromSettings.styles.map(style => [style.id, style.source]),
+    [['concise', 'settings'], ['spec', 'default']])
+  assert.equal(fromSettings.styles[0].prompt, '再短一点')
+})
+await test('多选风格拼进 system：可单选、可叠加、顺序固定', async () => {
+  const observations = setup({ systemPrompt: 'BASE' }, {
+    chunks: TEXT_CHUNKS,
+    selection: { provider: 'p', model: 'm' },
+    settingsSection: { stylePromptConcise: '压缩篇幅', stylePromptSpec: '条目化' },
+  })
+
+  const one = await drive(fakeRequest({ body: JSON.stringify({ text: 'x', styleIds: ['spec'] }) }))
+  assert.equal(one.status, 200)
+  assert.deepEqual(one.json.styleIds, ['spec'])
+  assert.equal(observations.calls[0].system, 'BASE\n\n本次额外要求（转规格）：条目化')
+
+  // 两个风格叠加：按**风格清单顺序**拼（concise 在 spec 前），与请求里的点击顺序无关。
+  const both = await drive(fakeRequest({ body: JSON.stringify({ text: 'x', styleIds: ['spec', 'concise'] }) }))
+  assert.equal(both.status, 200)
+  assert.deepEqual(both.json.styleIds, ['spec', 'concise'])
+  assert.equal(
+    observations.calls[1].system,
+    'BASE\n\n本次额外要求（精简）：压缩篇幅\n\n本次额外要求（转规格）：条目化',
+  )
+
+  // 不选风格时请求体/响应体都不带 styleIds（老客户端与老宿主互不打扰）。
+  const plain = setup({ systemPrompt: 'BASE' }, { chunks: TEXT_CHUNKS, selection: { provider: 'p', model: 'm' } })
+  const none = await drive(fakeRequest({ body: '{"text":"x"}' }))
+  assert.equal(none.json.styleIds, undefined)
+  assert.equal(plain.calls[0].system, 'BASE')
+})
+await test('风格与预设可同时使用：风格在前、预设收尾', async () => {
+  const observations = setup(
+    { systemPrompt: 'BASE', presets: [{ id: 'extra', prompt: '额外要求' }] },
+    { chunks: TEXT_CHUNKS, selection: { provider: 'p', model: 'm' } },
+  )
+  const result = await drive(fakeRequest({
+    body: JSON.stringify({ text: 'x', presetId: 'extra', styleIds: ['concise'] }),
+  }))
+  assert.equal(result.status, 200)
+  assert.equal(
+    observations.calls[0].system,
+    'BASE\n\n本次额外要求（精简）：在保留全部约束的前提下压缩篇幅，去掉客套与重复表述。\n\n本次额外要求：额外要求',
+  )
+})
+await test('未知风格 400，且流式路由同样拒绝', async () => {
+  setup({}, { chunks: TEXT_CHUNKS, selection: { provider: 'p', model: 'm' } })
+  const bad = await drive(fakeRequest({ body: JSON.stringify({ text: 'x', styleIds: ['nope'] }) }))
+  assert.equal(bad.status, 400)
+  assert.equal(bad.json.error, 'unknown-style')
+
+  setup({}, { chunks: TEXT_CHUNKS, selection: { provider: 'p', model: 'm' } })
+  const response = fakeResponse()
+  await driveStream(response, fakeRequest({ body: JSON.stringify({ text: 'x', styleIds: ['nope'] }) }))
+  // 还没开流就失败 → 仍走 HTTP 状态码（两条路由准入一致）。
+  assert.equal(response.statusCode, 400)
+  assert.equal(response.writes.length, 0)
+})
+await test('catalog 下发风格清单与来源，但绝不下发提示词正文', async () => {
+  setup(
+    { presets: [{ id: 'concise', label: '精简', prompt: '组合层机密压缩要求' }] },
+    { settingsSection: { stylePromptSpec: '我自己的规格要求' } },
+  )
+  const catalog = await drivePath(ROUTE_CATALOG, fakeRequest({ method: 'GET' }))
+  assert.deepEqual(catalog.json.styles, [
+    { id: 'concise', label: '精简', source: 'config' },
+    { id: 'spec', label: '转规格', source: 'settings' },
+  ])
+  // 组合层/内置的提示词正文留在宿主：客户端只需要 id/label 与"当前用的是哪一层"。
+  const serialized = JSON.stringify(catalog.json)
+  assert.equal(serialized.includes('组合层机密压缩要求'), false, '组合层提示词正文绝不能下发')
+  assert.equal(serialized.includes('压缩篇幅'), false, '内置默认提示词正文也绝不下发')
+  // 但**用户自己填的值**必须回给设置页（否则表单显示不出当前值）——这一条与上面不冲突：
+  // 那是用户自己的输入，不是宿主侧的默认/组合层文案。
+  assert.equal(catalog.json.settings.section.stylePromptSpec, '我自己的规格要求')
 })
 
 console.log('')

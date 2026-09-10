@@ -88,8 +88,9 @@ const TMP_PARENT = writableParent()
  *
  * `webServer`/`llm` 用替身（只为让插件通过 `inject` 门，路由注册被捕获下来），
  * settings 提供者则按需挂**真实的** `dsh-settings-file`（写到临时文档，不碰用户配置）。
- * @param {{ settings?: 'before' | 'after' | 'never' }} options - 提供者挂载时机。
- * @returns {Promise<{ ctx: object, routes: object[], documentPath: string, dispose: () => Promise<void> }>} 句柄。
+ * @param {{ settings?: 'before' | 'after' | 'never', config?: object }} options - 提供者挂载时机与插件组合配置。
+ * @returns {Promise<{ ctx: object, routes: object[], calls: object[], documentPath: string,
+ *   dispose: () => Promise<void> }>} 句柄（`calls` 是每次 LLM 调用的入参，用来核对 system prompt）。
  */
 async function boot(options = {}) {
   const parent = TMP_PARENT
@@ -98,6 +99,7 @@ async function boot(options = {}) {
   const documentPath = join(dir, 'settings.yaml')
   const ctx = new Context()
   const routes = []
+  const calls = []
 
   ctx.plugin({
     name: 'host-stub-services',
@@ -112,7 +114,13 @@ async function boot(options = {}) {
         },
       })
       stub.provide('llm', {
-        stream: async function* stream() {},
+        // 记下每次调用的入参（system prompt 是"逐风格提示词是否真的生效"的唯一判据），
+        // 并回一段最小可用的文本流，让 /optimize 能走到 200。
+        stream: async function* stream(callOptions) {
+          calls.push(callOptions)
+          yield { type: 'text-delta', index: 0, text: '改写后的' }
+          yield { type: 'finish', reason: { kind: 'stop' } }
+        },
         listProviders: () => [],
         listModels: async () => [],
         resolveModelInfo: async (provider, model) => ({ provider, model, name: model }),
@@ -128,7 +136,7 @@ async function boot(options = {}) {
   if (options.settings === 'before') await mountSettings()
 
   // 宿主半：与真实组合一样，行里只 inject webServer/llm。
-  ctx.plugin(plugin)
+  ctx.plugin(plugin, options.config)
   await settle(30)
 
   if (options.settings === 'after') await mountSettings()
@@ -136,6 +144,7 @@ async function boot(options = {}) {
   return {
     ctx,
     routes,
+    calls,
     documentPath,
     dispose: async () => {
       await ctx.stop?.()
@@ -227,6 +236,56 @@ await test('提供者**晚于**插件激活就绪 → 命名空间仍须注册�
     const after = await drive(host.routes, ROUTE_CATALOG, 'GET')
     assert.equal(after.json.settings.section.systemPrompt, '集成测试写进去的', '目录路由必须反映用户层')
     assert.equal(after.json.effective.sources.prompt, 'settings', '生效配置必须来自用户层')
+  } finally {
+    await host.dispose()
+  }
+})
+
+await test('逐风格提示词：保存 → 生效来源变 settings → 下一次请求的 system 真的用它（真框架全链路）', async () => {
+  const host = await boot({
+    settings: 'after',
+    // 固定模型路由，否则 /optimize 会先以 502 no-model-route 结束，走不到 LLM。
+    config: { systemPrompt: 'BASE', model: { provider: 'p', model: 'm' } },
+  })
+  try {
+    // 保存之前：风格提示词来自内置默认。
+    const before = await drive(host.routes, ROUTE_CATALOG, 'GET')
+    const specBefore = before.json.styles.find(style => style.id === 'spec')
+    assert.equal(specBefore.source, 'default', '没配过时来源必须是内置默认')
+
+    // 走真实 settings 服务的写入通道（这正是客户端 mutate 落到的同一层），然后落盘。
+    await host.ctx.settings.update(SETTINGS_NAMESPACE, { stylePromptSpec: '条目化：背景/目标/约束/验收' })
+    await settle(30)
+    assert.equal(
+      readFileSync(host.documentPath, 'utf8').includes('条目化：背景/目标/约束/验收'),
+      true,
+      '逐风格提示词必须真的落进设置文档',
+    )
+
+    // 生效来源变了，而且只影响被覆盖的那一个风格。
+    const after = await drive(host.routes, ROUTE_CATALOG, 'GET')
+    assert.deepEqual(
+      after.json.styles.map(style => [style.id, style.source]),
+      [['concise', 'default'], ['spec', 'settings']],
+      '只有 spec 被覆盖，concise 仍回落到内置默认',
+    )
+    assert.equal(after.json.settings.section.stylePromptSpec, '条目化：背景/目标/约束/验收')
+
+    // 关键一步：下一次请求真的用了新提示词。
+    const optimized = await drive(host.routes, ROUTE, 'POST', { text: '写个脚本', styleIds: ['spec'] })
+    assert.equal(optimized.status, 200)
+    assert.deepEqual(optimized.json.styleIds, ['spec'])
+    assert.equal(
+      host.calls[host.calls.length - 1].system,
+      'BASE\n\n本次额外要求（转规格）：条目化：背景/目标/约束/验收',
+      '保存后的逐风格提示词必须出现在下一次调用的 system 里',
+    )
+
+    // 勾了风格但没勾那个风格时，它的提示词不该出现（多选是"按勾选拼"而不是"全都拼"）。
+    await drive(host.routes, ROUTE, 'POST', { text: '写个脚本', styleIds: ['concise'] })
+    const conciseSystem = host.calls[host.calls.length - 1].system
+    assert.equal(conciseSystem.includes('条目化：背景/目标/约束/验收'), false)
+    assert.equal(conciseSystem.startsWith('BASE\n\n本次额外要求（精简）：'), true)
   } finally {
     await host.dispose()
   }

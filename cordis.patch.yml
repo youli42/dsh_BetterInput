@@ -34,6 +34,14 @@
         # timeoutMs: 30000
         # maxInputChars: 8000
         # 可选：预设（请求带 presetId 时把对应 prompt 追加到 system）
+        #
+        # 注意 `concise` / `spec` 这两个 id 是**内置优化风格**（见 lib/policy.js 的 STYLE_DEFINITIONS）：
+        # 它们会出现在输入框旁的 ▾ 下拉框里、可以**多选**，因此不会再列进"预设"区（避免同一个风格出现两次）。
+        # 写在这里的 prompt 是这两个风格的**组合层默认值**，优先级低于设置页
+        # （设置 → 输入优化 → 优化风格提示词）里逐项填的值。
+        # 生效顺序：内置默认 ← 这里 ← 设置页。
+        #
+        # 用别的 id（例如 slower）就只是普通的一次性预设：点一次跑一次，不进多选区。
         presets:
           - id: concise
             label: 精简
