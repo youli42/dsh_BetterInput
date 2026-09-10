@@ -23,7 +23,7 @@
 
 ---
 
-## 0.5 实施进展（P0 + P1 已交付）
+## 0.5 实施进展（P0 + P1 + P2 + P3 已交付）
 
 | 文件 | 作用 |
 |---|---|
@@ -31,19 +31,27 @@
 | `cordis.patch.yml` | 把自己 insert 进插件树，内含唯一的配置入口 |
 | `lib/policy.js` | 零依赖策略层：配置校验、信任围栏、提示词拼装、JSON 收发 |
 | `lib/index.js` | 宿主半：`ctx.webServer` 路由 + `ctx.llm.stream()` + `BlockAssembler` |
-| `lib/client.js` | 浏览器半：座位注册 + 按钮组件（手写 bundle，无构建步骤） |
-| `lib/types/*.d.ts` | 对外契约类型 |
-| `test/smoke.mjs`、`test/client.smoke.mjs` | 24 个用例：宿主 16 + 浏览器 8，全绿 |
+| `lib/client.js` | 浏览器半：座位注册 + 优化/撤销按钮 + CAS + 撤销栈（手写 bundle，无构建步骤） |
+| `lib/types/*.d.ts` | 对外契约类型（含组件行为契约） |
+| `test/smoke.mjs`（16 例）、`test/client.smoke.mjs`（18 例） | 共 34 例，全绿 |
 
-**验收证据**：P0 已在 Web GUI 目视确认——按 README 的方式 A 装入 profile 后，按钮出现在输入框工具行右侧、模型选择器紧左边（2026-09-10）。P1 的路由尚未在真实宿主上 curl 过（单测用假 LLM 流覆盖了全部分支）。
+**验收证据**：P0 已在 Web GUI 目视确认——按 README 的方式 A 装入 profile 后，按钮出现在输入框工具行右侧、模型选择器紧左边（2026-09-10）。P1 的路由尚未在真实宿主上 curl 过（单测用假 LLM 流覆盖了全部分支）；P2/P3 的浏览器半行为由 18 个用例覆盖。
 
 实施期确认/修正的几点：
 
 1. **包名与 bundle id 必须一致** —— 定为 `dsh-better-input`，客户端 bundle 里写死同名字面量（宿主按包名组合 boot graph，不一致会加载不到）。
-2. **客户端半拿不到插件配置**（新发现，已影响设计）：web shell 用 `o.create({ name })` 创建客户端条目，boot graph 行只有 `{ id, url, rev, inject, immediately }`，没有 config 字段。所以 `seat` / `presets` 这类**客户端**选项只能由插件自己的 HTTP 路由下发；P0 先把座位写死为 `conversation.input.right`（改 `left` 是一行）。
-3. **`presets` 已在宿主侧实现**：`presetId` → 对应 `prompt` 追加到 system，未知名报 400。P4 只是补前端菜单 UI。
-4. **max-tokens 截断改为「返回已获得文本 + `truncated: true`」**，不当失败——撤销按钮兜底，比丢结果更有用。
-5. **可测性驱动分层**：`lib/policy.js` 刻意零 `@deepseek-ai` 依赖，因此宿主半能用假 ctx 驱动**真实**路由处理器（真的 `createUserMessage` / `BlockAssembler`，只把 `ctx.llm.stream` 换成替身）；浏览器半用极小 React 替身钉住「框架注入 props 的假设」与座位注册参数。
+2. **客户端半拿不到插件配置**（新发现，已影响设计）：web shell 用 `o.create({ name })` 创建客户端条目，boot graph 行只有 `{ id, url, rev, inject, immediately }`，没有 config 字段。所以 `seat` / `presets` / 撤销深度这类**客户端**选项只能由插件自己的 HTTP 路由下发；座位写死为 `conversation.input.right`，撤销深度写死为 10（与宿主默认值一致）。
+3. **点快照 props 的陷阱**（P2 实现要点）：座位组件拿到的是 owner props **点快照**，
+   异步回调里直接读闭包里的 `props.input` 会拿到过期数据。实现上用一个 `latest` ref
+   （每次渲染写入最新 props）供异步路径读取，CAS 与撤销校验都从 `latest.current.input` 取值。
+4. **`presets` 已在宿主侧实现**：`presetId` → 对应 `prompt` 追加到 system，未知名报 400。P4 只是补前端菜单 UI。
+5. **max-tokens 截断改为「返回已获得文本 + `truncated: true`」**，不当失败——撤销按钮兜底，比丢结果更有用。
+6. **取消链路是闭环的**：浏览器半生成中再点 = `AbortController.abort()`；宿主半靠
+   `res.on('close')` 感知断开并取消上游 `ctx.llm.stream()`（signal 合并了超时与客户端断开），
+   所以取消不会留下仍在计费的模型调用。
+7. **可测性驱动分层**：`lib/policy.js` 刻意零 `@deepseek-ai` 依赖，因此宿主半能用假 ctx 驱动**真实**
+   路由处理器（真的 `createUserMessage` / `BlockAssembler`，只把 `ctx.llm.stream` 换成替身）；
+   浏览器半用极小 React 替身 + 「真值 / 每次渲染新快照」的 harness，能真实复现「往返期间草稿被改 → CAS 失败」。
 
 ---
 
@@ -186,27 +194,19 @@ readonly imageIds: readonly DraftAttachmentId[]
 
 `InputActions` 里的写入口：`setDraft(text)`、`submit()`、`addImages/removeImage/pruneImages`。
 
-所以：
+于是组件只依赖三样东西：`useInput(s => s.draft)`（响应式读）、`latest.current.input`（异步路径读最新点快照）、
+`inputActions.setDraft()`（写）。实现见 `lib/client.js` 的 `BetterInputButton`，其数据流是：
 
-```jsx
-function OptimizeButton(props) {
-  const { input, useInput, inputActions, sessionId, t, optimize, undo } = props
-  const draft = useInput(s => s.draft)          // 响应式读
-  const busy = input.phase !== 'plain'
-  const hasChips = input.occurrences.length > 0
-
-  const onClick = async () => {
-    const before = draft
-    const rev = input.draftRev
-    if (before.trim() === '' || busy) return
-    const after = await optimize(presetId)      // 宿主往返
-    // CAS：只有草稿没被别人改过才替换
-    if (inputActions /* 当前 */ && currentRev() === rev) inputActions.setDraft(after)
-    pushUndo(sessionId, { before, after })
-  }
-  ...
-}
 ```
+点击 ──► 取快照(before, rev) ──► POST /optimize ──┬─► 失败/取消 ──► 提示（不写草稿）
+                                                 └─► 成功 ──► CAS(draft===before && draftRev===rev)
+                                                              ├─ 不一致 ──► 丢弃结果 + stale 提示
+                                                              └─ 一致 ──► setDraft(text) + 压撤销栈
+```
+
+**实现要点（踩过的坑）**：座位组件拿到的是 owner props **点快照**，异步回调里读闭包捕获的
+`props.input` 会拿到过期数据——必须用一个每次渲染都更新的 `latest` ref 作为异步路径的唯一读取口，
+CAS 判断与撤销校验都从 `latest.current.input` 取值。
 
 **红线**：
 - ❌ 不要 `querySelector` 改输入框 DOM。已安装版本的 composer 是 Lexical contenteditable + 芯片节点（`lib/types/client/input/editor/ComposerContentEditable.d.ts`、`chip-node.d.ts`），DOM 改法会被下一次渲染冲掉，还会绕过输入机状态机。（本地源码检出的 `InputBar.tsx` 已改为 `textarea + backdrop` 方案——**两版都靠同一套 `draft`/`setDraft` 契约**，这正是不要碰 DOM 的理由。）
@@ -217,24 +217,26 @@ function OptimizeButton(props) {
 
 **为什么必须自建**：`setDraft` 的注释是「Replace the whole draft (persisted-draft seed and programmatic writes)」——程序化写入不会进 Lexical 的原生 undo 历史，用户按 Ctrl+Z 不一定能回到原文。
 
-设计：
+设计（**已实现**）：
 
 ```ts
-type UndoRecord = { before: string; after: string; rev: number; at: number; presetId: string }
+type UndoRecord = { before: string; after: string; rev: number; at: number }
 // 每会话一条栈；插件生命周期内有效（放模块级 Map，不放 React state —— 避免座位重挂载/切会话丢栈）
-const stacks = new Map<SessionId, UndoRecord[]>()
-const MAX_DEPTH = 10
+const undoStacks = new Map<SessionId, UndoRecord[]>()
+const MAX_UNDO = 10   // 客户端读不到插件配置（R-10），先写死并与宿主默认值保持一致
 ```
 
-撤销时的三条规则：
+撤销时的三条规则（与实现一致）：
 
-1. **CAS 校验**：仅当 `input.draft === record.after` 时才允许撤销，避免覆盖用户后续手改的内容。
-2. **不匹配时**：按钮变为「内容已被修改，无法撤销」的禁用态（并提供「仍要恢复原文本」的二次确认，写进 tooltip）。
-3. **栈式多次撤销**：连按可逐层回退（默认 10 层，配置可调）。
+1. **CAS 校验**：仅当当前草稿 `=== record.after` 时才直接回退，避免覆盖用户后续手改的内容。
+2. **不匹配时不停摆**：第一次点击只给警告「草稿已被修改；再点一次可强制还原原文」，
+   同一条记录**连点两次才强制还原**——既不会误覆盖，也不会让用户卡在无法撤销的死角。
+3. **栈式多次撤销**：连按逐层回退（每层 10 条，超出丢最旧）；按会话隔离。
 
-UI：同一个 entry 组件渲染两个按钮（`[✨ 优化]` 与 `[↶ 撤销]`），撤销按钮仅在栈非空且 CAS 通过时出现，避免再注册一个座位。
+UI：一个 entry 组件渲染两个按钮（`[↶ 撤销]` `[✨ 优化]`），撤销按钮仅在栈非空时渲染，
+`data-state` 为 `clean`/`dirty` 反映 CAS 预判，省掉第二次注册座位。
 
-可选增强：撤销后把光标/焦点交回输入框（`inputActions` 无 focus API，需在组件里对编辑器宿主元素 `focus()`，属于可选的锦上添花）。
+撤销后把焦点交回输入框属于可选增强（`inputActions` 无 focus API，需直接对编辑器宿主元素 `focus()`）。
 
 ---
 
@@ -247,10 +249,9 @@ UI：同一个 entry 组件渲染两个按钮（`[✨ 优化]` 与 `[↶ 撤销]
 ```yaml
 - insert:
     - id: better-input
-      name: 'better-input'
+      name: 'dsh-better-input'
       config:
-        seat: right
-        model: { provider: deepseek-official, model: deepseek-v4-flash }  # 省略则用当前选择
+        model: { provider: deepseek-official, model: deepseek-v4-flash }  # 省略则用宿主当前选择
         systemPrompt: |
           你是提示词工程师。把用户草稿改写成更清晰、无歧义、结构化的任务描述。
           保留原有语言；不要回答问题本身；只输出改写后的文本。
@@ -260,8 +261,10 @@ UI：同一个 entry 组件渲染两个按钮（`[✨ 优化]` 与 `[↶ 撤销]
         maxInputChars: 8000
         timeoutMs: 30000
         maxOutputTokens: 1024
-        undoDepth: 10
 ```
+
+**注意**：`seat`（座位选择）与撤销深度这类**客户端**选项**不在**配置键里——客户端半拿不到插件配置（见 R-10），
+写进 `config:` 只会让启动失败（未知键 fail loud）。它们目前是 `lib/client.js` 里的常量（`SEAT`、`MAX_UNDO`）。
 
 规范要求（`docs/user/develop/basic/config.md`、`dsh-session-title-llm` 的 `resolve*Config` 模式）：
 - 用 `z.object({...})` 显式声明字段；**`required()` 的字段缺失会让 profile 启动失败**（fail loud），所以除 `systemPrompt` 外一律给 `.default()`。
@@ -391,7 +394,7 @@ POST /api/dsh-input-optimizer/optimize
 
 ```json
 {
-  "name": "better-input",
+  "name": "dsh-better-input",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -426,9 +429,8 @@ POST /api/dsh-input-optimizer/optimize
 # 与 profile 里已有的 mcp-everything insert 同构
 - insert:
     - id: better-input
-      name: 'better-input'
+      name: 'dsh-better-input'
       config:
-        seat: right
         systemPrompt: |
           你是提示词工程师……
 ```
@@ -438,7 +440,7 @@ POST /api/dsh-input-optimizer/optimize
 ```js
 // lib/client.js
 window.__ModuleLoader__.load({
-  id: 'better-input',                 // 必须等于包名
+  id: 'dsh-better-input',             // 必须等于包名
   factory: (require) => {
     var module = { exports: {} }; var exports = module.exports
     const React = require('react')
@@ -482,10 +484,10 @@ window.__ModuleLoader__.load({
 |---|---|---|
 | **P0** 骨架 | 包结构 + 空座位注册 + 按钮出现在模型左侧 | ✅ 已在 GUI 目视确认（2026-09-10） |
 | **P1** 宿主路由 | `/api/dsh-input-optimizer/optimize` + 固定 system prompt + `ctx.llm.stream` | ✅ 已实现（16 例绿；真实 curl 待确认） |
-| **P2** 前后端接线 | 读 `input.draft` → POST → `setDraft` + 失败提示 | ⬜ 待做 |
-| **P3** 撤销 | 撤销栈 + CAS + 撤销按钮 + `draftRev` 校验 | ⬜ 待做 |
+| **P2** 前后端接线 | 读 `input.draft` → POST → `setDraft` + CAS + 取消 + 失败提示 | ✅ 已实现（含 stale 丢弃、403/404/网络/空结果文案） |
+| **P3** 撤销 | 撤销栈 + CAS + 撤销按钮 + `draftRev` 校验 | ✅ 已实现（含二次点击强制还原、10 层深度、按会话隔离） |
 | **P4** 提示词自定义 | L1 配置已完成（含 `presets`）；再做客户端 `GET /config` + 预设菜单 | ⬜ 部分待做 |
-| **P5** 打磨 | 流式回填、芯片策略、i18n、并发/超时/取消、vitest 化单测 | ⬜ 待做 |
+| **P5** 打磨 | 流式回填、芯片保留（`insertReference` 重建）、vitest 化单测 | ⬜ 待做 |
 
 ---
 
@@ -528,74 +530,16 @@ window.__ModuleLoader__.load({
 | 插件配置/安装教程 | `docs/user/develop/basic/index.md`、`config.md`；`dsh plugin --profile web <pnpm 参数>` |
 | 参考实现（座位注册） | `@deepseek-ai/dsh-client-ui-model-selection/lib/client.js:828-892` |
 
-## 11. 附录 B：最小可跑骨架（P0 验收用）
 
-**lib/client.js**
-```js
-window.__ModuleLoader__.load({
-  id: 'better-input',
-  factory: (require) => {
-    var module = { exports: {} }; var exports = module.exports
-    const React = require('react')
-    const SEAT = 'conversation.input.right'
-    const NS = 'inputOptimizer'
-    const zh = { optimize: '优化输入', running: '优化中…', undo: '撤销' }
-    const en = { optimize: 'Optimize input', running: 'Optimizing…', undo: 'Undo' }
+## 11. 附录 B：实现文件索引（不再维护重复骨架）
 
-    function OptimizeButton(props) {
-      const { t, useInput } = props
-      const draft = useInput(s => s.draft)
-      const [running, setRunning] = React.useState(false)
-      const disabled = running || draft.trim() === ''
-      return React.createElement(React.Fragment, null,
-        React.createElement('button', {
-          type: 'button',
-          className: 'dsh-bi-btn',
-          'aria-label': t('optimize'),
-          title: t('optimize'),
-          disabled,
-          onMouseDown: e => e.preventDefault(),          // 不抢焦点
-          onClick: async () => {
-            setRunning(true)
-            try {
-              const res = await fetch('/api/dsh-input-optimizer/optimize', {
-                method: 'POST',
-                headers: { 'content-type': 'application/json' },
-                body: JSON.stringify({ text: draft }),
-              })
-              const data = await res.json()
-              if (res.ok && typeof data.text === 'string') props.inputActions.setDraft(data.text)
-            } finally { setRunning(false) }
-          },
-        }, running ? '…' : '✨'))
-    }
+P0 期曾把「最小可跑骨架」抄在这里，但骨架会与真实代码漂移——现在以文件为唯一事实来源：
 
-    const inject = ['slots', 'locale']
-    function apply(ctx) {
-      ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'better-input: dictionaries')
-      ctx.inject(['slots'], (scope) => {
-        scope.slots.inject(SEAT, () => scope.slots.register({
-          name: SEAT, id: 'better-input', order: 10, locale: NS,
-        }, OptimizeButton))
-      })
-    }
-    exports.apply = apply
-    exports.inject = inject
-    return module.exports
-  },
-})
-```
-
-**lib/index.js**（P0 可先只留路由占位，P1 再补 LLM）
-```js
-export const name = 'better-input'
-export const inject = ['webServer']
-export function apply(ctx, config = {}) {
-  const dispose = ctx.webServer.register({
-    kind: 'exact',
-    path: '/api/dsh-input-optimizer/optimize',
-    handler: (req, res) => { res.statusCode = 501; res.end('{"error":"not-implemented"}') },
-  })
-  ctx.effect(() => dispose)
-}
-```
+| 想读什么 | 看哪里 |
+|---|---|
+| 座位注册、按钮状态机、CAS、撤销栈、词典 | [`lib/client.js`](./lib/client.js)（一个文件、六个小节注释分区） |
+| 路由挂载、模型路由解析、LLM 一次性调用、错误码 | [`lib/index.js`](./lib/index.js) |
+| 配置校验、信任围栏、提示词 JSON 框架、JSON 收发 | [`lib/policy.js`](./lib/policy.js)（零依赖，可 `node` 直接跑） |
+| 行为与接口契约（含撤销/取消语义） | [`lib/types/client/index.d.ts`](./lib/types/client/index.d.ts) |
+| 宿主契约与错误码清单 | [`lib/types/index.d.ts`](./lib/types/index.d.ts) |
+| 可执行的行为说明（34 例） | [`test/smoke.mjs`](./test/smoke.mjs)、[`test/client.smoke.mjs`](./test/client.smoke.mjs) |

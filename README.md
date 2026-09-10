@@ -8,12 +8,14 @@ DSH Web GUI 插件：在**模型选择器左侧**加一个「AI 优化输入」�
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| P0 | 骨架：座位注册 + 按钮出现在模型左侧 | ✅ 已实现，并已在 Web GUI 目视确认（2026-09-10） |
-| P1 | 宿主半：`/api/dsh-input-optimizer/optimize` + `ctx.llm.stream()` 一次性调用 | ✅ 已实现（16 个单测绿；curl 待确认） |
-| P2 | 前后端接线：读草稿 → POST → `setDraft` + 失败提示 | ⬜ 待做（接线点已在 `lib/client.js` 标注） |
-| P3 | 撤销栈 + CAS 校验 + 撤销按钮 | ⬜ 待做 |
-| P4 | 预设菜单 UI / settings 命名空间 | ⬜ 待做（宿主侧 `presets` 已可用） |
-| P5 | 芯片策略、i18n 打磨、并发/取消 | ⬜ 待做 |
+| P0 | 骨架：座位注册 + 按钮出现在模型左侧 | ✅ 已在 Web GUI 目视确认（2026-09-10） |
+| P1 | 宿主半：`/api/dsh-input-optimizer/optimize` + `ctx.llm.stream()` 一次性调用 | ✅ 已实现 |
+| P2 | 前后端接线：读草稿 → POST → `setDraft` + CAS + 取消 + 失败提示 | ✅ 已实现 |
+| P3 | 撤销栈 + CAS 校验 + 撤销按钮（含强制还原、10 层深度） | ✅ 已实现 |
+| P4 | 预设菜单 UI（`GET /config` 下发 + `conversation.input.overlay` 浮层） | ⬜ 待做（宿主侧 `presets` 已可用） |
+| P5 | 流式回填、芯片保留、vitest 化 | ⬜ 待做 |
+
+单测：宿主半 16 例 + 浏览器半 18 例，全绿。
 
 > 本机安装记录（2026-09-10，即下面的方式 A）：`dsh plugin --profile web add link:D:\SSDWP\AI\dsh\BetterInput`，
 > 并把 `"dsh-better-input"` 加进 `~/.dsh/profiles/web/package.json` 的 `dsh.profile.bundles`。
@@ -28,7 +30,7 @@ lib/policy.js         策略层：零依赖，配置校验/信任围栏/提示�
 lib/client.js         浏览器半：座位注册 + 按钮组件（window.__ModuleLoader__ 工厂，手写无需构建）
 lib/types/*.d.ts      对外类型
 test/smoke.mjs        宿主半冒烟测试（16 例）
-test/client.smoke.mjs 浏览器半冒烟测试（8 例）
+test/client.smoke.mjs 浏览器半冒烟测试（18 例：含 P2 接线与 P3 撤销栈）
 DESIGN.md             设计依据：座位/接口证据、撤销方案、提示词分层、风险清单
 LICENSE               MIT
 ```
@@ -89,8 +91,8 @@ curl.exe -s -X POST http://127.0.0.1:3080/api/dsh-input-optimizer/optimize `
 3. **单测**：
 
 ```powershell
-node test\smoke.mjs          # 宿主半：配置、围栏、路由全链路（含超时/截断/错误码）
-node test\client.smoke.mjs   # 浏览器半：bundle id、座位注册参数、组件契约
+node test\smoke.mjs          # 宿主半 16 例：配置、围栏、路由全链路（含超时/截断/错误码）
+node test\client.smoke.mjs   # 浏览器半 18 例：座位注册、组件契约、P2 接线、P3 撤销栈
 ```
 
 > 宿主半测试需要 `@deepseek-ai/dsh-llm` 可见。装进 profile 后天然可见；在本目录直接跑测试时，
@@ -100,6 +102,22 @@ node test\client.smoke.mjs   # 浏览器半：bundle id、座位注册参数、�
 > New-Item -ItemType Junction node_modules\@deepseek-ai\dsh-llm `
 >   -Target "$env:LOCALAPPDATA\nvm\v24.18.0\node_modules\@deepseek-ai\dsh\node_modules\@deepseek-ai\dsh-llm"
 > ```
+
+## 行为说明（已实现）
+
+| 场景 | 行为 |
+|---|---|
+| 点击 ✨ | `POST /api/dsh-input-optimizer/optimize`（body `{ text, sessionId }`），成功后 `setDraft` 写回 |
+| 生成中再点 | **取消**（abort；宿主侧同时取消上游模型调用，不产生费用累积） |
+| 生成中用户继续打字 | 返回时 CAS（`draftRev` + 文本双比对）失败 → **丢弃结果**，提示「草稿已变化」 |
+| 成功后 | 出现 ↶ 撤销按钮；提示 3 秒后自动消失 |
+| 撤销 | CAS 通过才回退到优化前草稿；草稿被手改过时第一次点击只警告，**再点一次强制还原** |
+| 撤销深度 | 每会话 10 层，可连按逐层回退；按会话隔离 |
+| 草稿含 `@引用`/`/命令` 芯片 | 拒绝发起（整体 `setDraft` 会把芯片拉平成纯文本），提示先删掉芯片 |
+| 输入机非空闲（提交/裁决中） | 按钮禁用 |
+| 宿主报错 | 直接展示宿主返回的 `message`（如「草稿 9001 字，超过上限 8000 字」）；403/404 有专门文案 |
+
+提示文本用 GUI 的设计令牌上色（`--dsw-alias-state-{success,warn,error}-primary`），令牌缺失时回落 `currentColor`。
 
 ## 配置参考（`cordis.patch.yml` 的 `config:`）
 
@@ -139,20 +157,7 @@ body: { text: string, sessionId?: string, presetId?: string }
 - **宿主半**：改 `lib/index.js` / `lib/policy.js` 需要重启 `dsh web`。
 - 每次改完先跑两个 smoke 测试，再动 GUI。
 
-## 下一步（P2 接线点）
+## 下一步（P4 / P5）
 
-`lib/client.js` 的 `onClick` 里已标注 P2 的代码形状：
-
-```js
-const res = await fetch(ROUTE, { method: 'POST',
-  headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({ text: draft, sessionId: props.sessionId }) })
-const data = await res.json()
-if (res.ok) props.inputActions.setDraft(data.text)
-```
-
-必须同时做的两件事（见 `DESIGN.md` §3.3/§3.4）：
-1. **CAS**：发起前记下 `input.draftRev` 与草稿原文，返回时若草稿已被改动就丢弃结果，不要覆盖用户输入；
-2. **撤销**：替换成功才压栈（`{ before, after, rev }`），撤销时同样做 CAS 校验。
-
-另：草稿含芯片（`input.occurrences.length > 0`，即 `@引用`/`/命令`）时默认应拒绝——整体 `setDraft` 会把芯片拉平成纯文本。
+- **P4 提示词自定义的图形化**：宿主侧 `presets` 已可用（`presetId` 追加 system），缺的是前端菜单。客户端读不到插件配置（见 `DESIGN.md` R-10），所以要加一条 `GET /config` 下发预设列表，再把菜单挂在 `conversation.input.overlay`（composer 卡片内浮层座位）。
+- **P5 打磨**：流式回填（把宿主改成 SSE 或分块返回）、芯片保留（研究 `insertReference` 重建而非拉平）、把两个 smoke 套件迁到 vitest、多语言词典扩充。

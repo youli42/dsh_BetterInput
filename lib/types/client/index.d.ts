@@ -30,8 +30,28 @@ export interface BetterInputState {
   /** 单调编辑器修订号（CAS 基准）。 */
   readonly draftRev: number
   readonly phase: 'plain' | 'adjudicating' | 'claimed' | 'submitting'
-  /** 编辑器里的芯片出现位置；非空意味着整体 setDraft 会把引用拉平成纯文本。 */
+  /** 编辑器里的芯片出现位置；非空意味着整体 setDraft 会把引用拉平成纯文本 → 本插件拒绝优化。 */
   readonly occurrences: readonly unknown[]
+}
+
+/**
+ * 组件行为契约（与实现、测试一一对应）：
+ *
+ * - 点击 → `POST /api/dsh-input-optimizer/optimize`（body `{ text, sessionId }`），
+ *   生成中再点 = 取消（abort，宿主侧同时取消上游模型调用）。
+ * - 返回后做 CAS（`draftRev` + 文本双比对），草稿在往返期间被改过就丢弃结果。
+ * - 成功后 `inputActions.setDraft(text)` 写回，并压入撤销栈。
+ * - 撤销按钮只在栈非空时渲染；CAS 通过才回退，不通过时同一条记录连点两次强制还原。
+ * - 撤销栈按会话隔离、深度 10、仅存活于插件生命周期（不进 React state，避免重挂载丢栈）。
+ * - 草稿含芯片（`occurrences` 非空）或输入机非 `plain` 时拒绝发起。
+ */
+export interface BetterInputBehavior {
+  /** 宿主路由。 */
+  route: '/api/dsh-input-optimizer/optimize'
+  /** 每会话撤销栈深度。 */
+  maxUndo: 10
+  /** 生成中是否可取消。 */
+  cancellable: true
 }
 
 /** 需要就绪的客户端服务。 */
