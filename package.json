@@ -42,8 +42,13 @@
   ],
   "scripts": {
     "link-deps": "node scripts/link-dev-deps.mjs",
+    "lint": "node scripts/lint.mjs",
+    "format": "node scripts/lint.mjs --write --formatter-enabled=true",
     "pretest": "node scripts/link-dev-deps.mjs",
     "test": "node test/smoke.mjs && node test/client.smoke.mjs && node test/settings-activation.mjs"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.8"
   },
   "peerDependencies": {
     "react": "^18.2.0",
