@@ -14,6 +14,7 @@ import {
   ROUTE_CATALOG,
   ROUTE_CATALOG_MODELS,
   ROUTE_CHECK,
+  ROUTE_STREAM,
   SETTINGS_NAMESPACE,
   effectiveConfig,
   isIPv4Loopback,
@@ -72,6 +73,8 @@ function fakeResponse() {
     statusCode: 0,
     headers: {},
     body: undefined,
+    /** 每次 `write()` 的内容，按顺序（SSE 用例靠它看"什么时候写了什么"）。 */
+    writes: [],
     writableEnded: false,
     onClose: undefined,
     setHeader(key, value) {
@@ -81,12 +84,37 @@ function fakeResponse() {
       if (event === 'close') this.onClose = listener
     },
     off() {},
+    write(chunk) {
+      this.writes.push(String(chunk))
+      return true
+    },
     end(body) {
-      this.body = body
+      if (body !== undefined) this.body = body
       this.writableEnded = true
       this.onClose?.()
     },
   }
+}
+
+/**
+ * 把 SSE 的写出内容解析成事件序列。
+ * @param {string[]} writes - `response.writes`。
+ * @returns {Array<{ event: string, data: any }>} 事件（忽略以 `:` 开头的注释帧）。
+ */
+function parseSse(writes) {
+  const events = []
+  for (const frame of writes) {
+    for (const block of frame.split('\n\n')) {
+      const lines = block.split('\n').filter(line => line !== '')
+      if (lines.length === 0) continue
+      if (lines[0].startsWith(':')) continue
+      const event = lines.find(line => line.startsWith('event: '))?.slice('event: '.length)
+      const data = lines.find(line => line.startsWith('data: '))?.slice('data: '.length)
+      if (event === undefined) continue
+      events.push({ event, data: data === undefined ? undefined : JSON.parse(data) })
+    }
+  }
+  return events
 }
 
 /**
@@ -212,7 +240,21 @@ function fakeCtx(options = {}) {
           }
           callOptions.signal?.throwIfAborted()
           if (options.fail !== undefined) throw options.fail
-          for (const chunk of options.chunks ?? []) yield chunk
+          for (const [index, chunk] of (options.chunks ?? []).entries()) {
+            // midDelayMs：在第 2 个 chunk 之前停一下——流式用例靠它证明"增量是边来边写的"，
+            // 而不是等全部收完再一次性吐出（若是一次性，这段停顿时长内就不会有任何 write）。
+            // 停顿同样必须遵守 signal（真实适配器契约），否则"客户端断开"用例测不出效果。
+            if (index === 1 && options.midDelayMs !== undefined) {
+              await new Promise((resolve, reject) => {
+                const timer = setTimeout(resolve, options.midDelayMs)
+                callOptions.signal?.addEventListener('abort', () => {
+                  clearTimeout(timer)
+                  reject(callOptions.signal.reason ?? new Error('aborted'))
+                }, { once: true })
+              })
+            }
+            yield chunk
+          }
         },
         listProviders() {
           if (options.providersFail !== undefined) throw options.providersFail
@@ -240,6 +282,18 @@ function fakeCtx(options = {}) {
 
 /** 让一条已开始的请求推进到"停在 stream 上"的状态（并发用例需要它制造重叠）。 */
 const flush = async () => { await new Promise(resolve => setImmediate(resolve)) }
+
+/**
+ * 驱动**流式**路由：与 `drive` 的区别是结果不在 `end()` 的 body 里，而在 `write()` 序列里。
+ * @param {object} response - fakeResponse（调用方持有，便于中途观察 writes）。
+ * @param {object} request - 假请求。
+ * @returns {Promise<void>} 处理器完成。
+ */
+async function driveStream(response, request) {
+  const route = lastFake.routes.find(item => item.path === ROUTE_STREAM)
+  assert.ok(route !== undefined, `route ${ROUTE_STREAM} was not registered`)
+  await route.handler(request, response)
+}
 
 /** 最近一次 apply 注册的路由（由 setup 填充）。 */
 let boundRoute
@@ -385,7 +439,7 @@ await test('插件契约：name/inject 与路由挂载点', () => {
   assert.deepEqual(inject, ['webServer', 'llm'])
   assert.deepEqual(
     routes.map(route => route.path).sort(),
-    [ROUTE_CATALOG, ROUTE_CATALOG_MODELS, ROUTE, ROUTE_CHECK].sort(),
+    [ROUTE_CATALOG, ROUTE_CATALOG_MODELS, ROUTE, ROUTE_STREAM, ROUTE_CHECK].sort(),
   )
   for (const route of routes) {
     assert.equal(route.kind, 'exact')
@@ -406,7 +460,7 @@ await test('日志必须真的落进 ctx.logger（ctx.get("logger") 恒为 undef
   assert.ok(mounted !== undefined, 'apply 必须打印 mounted 日志')
   assert.equal(mounted.level, 'info')
   // printf 风格：ROUTE 是参数而不是拼进格式串（否则消息里的 % 占位符会被吃掉）。
-  assert.equal(mounted.format, 'better-input: mounted %s (+catalog/check)')
+  assert.equal(mounted.format, 'better-input: mounted %s (+stream/catalog/check)')
   assert.equal(mounted.params[0], ROUTE)
   // 设置命名空间的注册结论也必须有一条明确日志（否则"设置服务不可用"根本无从排查）。
   const registered = observations.logs.find(entry => String(entry.format).includes('settings namespace'))
@@ -424,6 +478,159 @@ await test('日志必须真的落进 ctx.logger（ctx.get("logger") 恒为 undef
   const failure = broken.logs.find(entry => entry.level === 'warn')
   assert.equal(failure.format, 'better-input: %s: %s')
   assert.deepEqual(failure.params, ['model-failed', 'boom %s'], '消息必须作为参数传，不能被当格式串')
+})
+
+console.log('host half: 流式优化（SSE）')
+await test('增量边来边写：先 delta 帧，最后 done 帧带权威文本', async () => {
+  const observations = setup({}, {
+    chunks: [
+      { type: 'text-delta', index: 0, text: '改写后的' },
+      { type: 'text-delta', index: 0, text: '提示词。' },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ],
+    midDelayMs: 60,   // 第 2 个 chunk 之前停 60ms：这期间必须已经写出了第 1 个 delta
+    selection: { provider: 'p', model: 'm' },
+  })
+  const response = fakeResponse()
+  const handler = driveStream(response, fakeRequest({ body: '{"text":"x"}' }))
+
+  // 处理器还没结束（卡在 midDelay），但第一个增量**已经写出**——这才叫流式。
+  await flush()
+  assert.equal(response.statusCode, 200)
+  assert.equal(response.headers['content-type'], 'text/event-stream; charset=utf-8')
+  assert.equal(response.headers['cache-control'], 'no-store')
+  assert.deepEqual(parseSse(response.writes), [{ event: 'delta', data: { text: '改写后的' } }])
+  assert.equal(response.writableEnded, false, '此时流还不能结束')
+
+  await handler
+  assert.deepEqual(parseSse(response.writes), [
+    { event: 'delta', data: { text: '改写后的' } },
+    { event: 'delta', data: { text: '提示词。' } },
+    { event: 'done', data: { text: '改写后的提示词。', modelUsed: { provider: 'p', model: 'm' } } },
+  ])
+  assert.equal(response.writableEnded, true)
+  assert.equal(observations.calls.length, 1, '只调用模型一次')
+})
+await test('max-tokens 截断：done 帧标注 truncated', async () => {
+  setup({}, {
+    chunks: [{ type: 'text-delta', index: 0, text: '半截' }, { type: 'finish', reason: { kind: 'max-tokens' } }],
+    selection: { provider: 'p', model: 'm' },
+  })
+  const response = fakeResponse()
+  await driveStream(response, fakeRequest({ body: '{"text":"x"}' }))
+  const events = parseSse(response.writes)
+  assert.deepEqual(events.at(-1), {
+    event: 'done',
+    data: { text: '半截', modelUsed: { provider: 'p', model: 'm' }, truncated: true },
+  })
+})
+await test('模型失败 / 未知终态 / 空输出：开流后用 error 帧或 done 帧收尾', async () => {
+  setup({}, { fail: new Error('provider exploded'), selection: { provider: 'p', model: 'm' } })
+  const failed = fakeResponse()
+  await driveStream(failed, fakeRequest({ body: '{"text":"x"}' }))
+  assert.deepEqual(parseSse(failed.writes), [
+    { event: 'error', data: { error: 'model-failed', message: 'provider exploded' } },
+  ])
+  assert.equal(failed.writableEnded, true, 'error 之后必须收尾')
+
+  // 未知终态与 JSON 路由语义一致：已拿到的文本仍可用，只记告警。
+  const unknown = setup({}, {
+    chunks: [{ type: 'text-delta', index: 0, text: '照样可用' }, { type: 'finish', reason: { kind: 'content-filter' } }],
+    selection: { provider: 'p', model: 'm' },
+  })
+  const filtered = fakeResponse()
+  await driveStream(filtered, fakeRequest({ body: '{"text":"x"}' }))
+  assert.deepEqual(parseSse(filtered.writes), [
+    { event: 'delta', data: { text: '照样可用' } },
+    { event: 'done', data: { text: '照样可用', modelUsed: { provider: 'p', model: 'm' } } },
+  ])
+  assert.equal(unknown.logs.some(entry => String(entry.format).includes('unknown finish reason')), true)
+
+  const empty = setup({}, { chunks: [{ type: 'finish', reason: { kind: 'stop' } }], selection: { provider: 'p', model: 'm' } })
+  const blank = fakeResponse()
+  await driveStream(blank, fakeRequest({ body: '{"text":"x"}' }))
+  assert.equal(parseSse(blank.writes).at(-1).event, 'error')
+  assert.equal(parseSse(blank.writes).at(-1).data.error, 'model-failed')
+  assert.equal(empty.calls.length, 1)
+})
+await test('准入失败（还没开流）仍走 HTTP 状态码：空草稿 400 / 超长 400 / 闸门 409', async () => {
+  setup({ maxInputChars: 5 }, { chunks: TEXT_CHUNKS, selection: { provider: 'p', model: 'm' } })
+  const blank = fakeResponse()
+  await driveStream(blank, fakeRequest({ body: '{"text":"  "}' }))
+  assert.equal(blank.statusCode, 400, '开流之前失败必须用状态码，客户端好按既有文案处理')
+  assert.equal(blank.headers['content-type'], 'application/json; charset=utf-8')
+
+  const tooLong = fakeResponse()
+  await driveStream(tooLong, fakeRequest({ body: '{"text":"123456"}' }))
+  assert.equal(tooLong.statusCode, 400)
+  assert.equal(JSON.parse(tooLong.body).error, 'text-too-long')
+
+  // 同会话并发：第二条必须 409（流式路由与 JSON 路由共用同一个闸门）。
+  const first = setup({}, { chunks: TEXT_CHUNKS, delayMs: 40, selection: { provider: 'p', model: 'm' } })
+  const held = fakeResponse()
+  const running = driveStream(held, fakeRequest({ body: '{"text":"a","sessionId":"s1"}' }))
+  await flush()
+  const conflict = fakeResponse()
+  await driveStream(conflict, fakeRequest({ body: '{"text":"b","sessionId":"s1"}' }))
+  assert.equal(conflict.statusCode, 409)
+  assert.equal(JSON.parse(conflict.body).error, 'busy-session')
+  await running
+  assert.equal(first.calls.length, 1)
+})
+await test('信任判定同样生效：401 / 403 在开流之前就挡住', async () => {
+  const unauthorized = setup({}, {
+    chunks: TEXT_CHUNKS,
+    selection: { provider: 'p', model: 'm' },
+    connection: { requestRejection: () => 401 },
+  })
+  const noSession = fakeResponse()
+  await driveStream(noSession, fakeRequest({ body: '{"text":"x"}' }))
+  assert.equal(noSession.statusCode, 401)
+  assert.equal(JSON.parse(noSession.body).error, 'unauthorized')
+  assert.equal(unauthorized.calls.length, 0)
+
+  setup({}, { chunks: TEXT_CHUNKS, selection: { provider: 'p', model: 'm' } })
+  const alien = fakeResponse()
+  await driveStream(alien, fakeRequest({ remoteAddress: '10.1.2.3', body: '{"text":"x"}' }))
+  assert.equal(alien.statusCode, 403)
+})
+await test('超时：开流后发 error 帧（timeout）并收尾', async () => {
+  const observations = setup({ timeoutMs: 1000 }, {
+    chunks: TEXT_CHUNKS,
+    delayMs: 60000,
+    selection: { provider: 'p', model: 'm' },
+  })
+  const response = fakeResponse()
+  await driveStream(response, fakeRequest({ body: '{"text":"x"}' }))
+  const last = parseSse(response.writes).at(-1)
+  assert.equal(last.event, 'error')
+  assert.equal(last.data.error, 'timeout')
+  assert.equal(response.writableEnded, true)
+  assert.equal(observations.logs.some(entry => String(entry.params?.[0] ?? '').includes('timed out')), true)
+})
+await test('客户端中途断开：不写事件、不抛错，闸门照常释放', async () => {
+  setup({}, {
+    chunks: [
+      { type: 'text-delta', index: 0, text: '第一段' },
+      { type: 'text-delta', index: 1, text: '第二段' },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ],
+    midDelayMs: 40,
+    selection: { provider: 'p', model: 'm' },
+  })
+  const response = fakeResponse()
+  const running = driveStream(response, fakeRequest({ body: '{"text":"x","sessionId":"s9"}' }))
+  await flush()
+  response.onClose?.()          // 模拟客户端断开：host 侧的 close 事件
+  await running                 // 不得抛出
+  const events = parseSse(response.writes)
+  assert.deepEqual(events, [{ event: 'delta', data: { text: '第一段' } }], '断开后不再写事件')
+
+  // 名额已归还：同一会话可以立刻再来一次。
+  setup({}, { chunks: TEXT_CHUNKS, selection: { provider: 'p', model: 'm' } })
+  const retry = fakeResponse()
+  await driveStream(retry, fakeRequest({ body: '{"text":"x","sessionId":"s9"}' }))
+  assert.equal(parseSse(retry.writes).at(-1).event, 'done')
 })
 
 console.log('host half: 请求处理')
@@ -534,7 +741,7 @@ await test('信任判定优先交给框架的 connection.requestRejection（403/
   // 5) 但**非环回**客户端即便只是读元数据也要被拒（LAN 客户端必须带会话）。
   const lan = await drivePath(ROUTE_CATALOG, fakeRequest({ method: 'GET', remoteAddress: '10.1.2.3' }))
   assert.equal(lan.status, 403)
-  assert.equal(metadata.routes.length, 4)
+  assert.equal(metadata.routes.length, 5)
 })
 await test('connection 判定抛错时回落旧围栏（不是放行）', async () => {
   const observations = setup({}, {
@@ -705,7 +912,7 @@ await test('注册 better-input 命名空间，applies=live，validate 拒绝非
 await test('部署没挂设置提供者时：不报错、不注册、路由照挂', async () => {
   const observations = setup({}, { settings: false, chunks: TEXT_CHUNKS, selection: { provider: 'p', model: 'm' } })
   assert.equal(observations.settingsCalls.length, 0)
-  assert.equal(observations.routes.length, 4)
+  assert.equal(observations.routes.length, 5)
   const result = await drive(fakeRequest({ body: '{"text":"x"}' }))
   assert.equal(result.status, 200)
   assert.equal(result.json.text, '改写后的提示词。')

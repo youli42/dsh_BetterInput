@@ -28,7 +28,7 @@ import { Context } from '@deepseek-ai/cordis'
 import SettingsFile from '@deepseek-ai/dsh-settings-file'
 
 import * as plugin from '../lib/index.js'
-import { ROUTE, ROUTE_CATALOG, SETTINGS_NAMESPACE } from '../lib/policy.js'
+import { ROUTE, ROUTE_CATALOG, ROUTE_STREAM, SETTINGS_NAMESPACE } from '../lib/policy.js'
 
 /**
  * 临时目录：**优先放仓库内**（`test/.tmp/`，已 gitignore）。
@@ -237,7 +237,13 @@ await test('完全没有设置提供者 → 插件照常挂载，只是 settings
   try {
     assert.deepEqual(
       host.routes.map(route => route.path).sort(),
-      [ROUTE, ROUTE_CATALOG, `${ROUTE_CATALOG}/models`, '/api/dsh-input-optimizer/check'].sort(),
+      [
+        ROUTE,
+        ROUTE_STREAM,
+        ROUTE_CATALOG,
+        `${ROUTE_CATALOG}/models`,
+        '/api/dsh-input-optimizer/check',
+      ].sort(),
       '不能因为等 settings 就整个不激活（部署可能没有设置提供者）',
     )
     const catalog = await drive(host.routes, ROUTE_CATALOG, 'GET')
