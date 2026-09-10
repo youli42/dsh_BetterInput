@@ -45,15 +45,20 @@ export interface BetterInputState {
  *   生成中再点 = 取消（abort，宿主侧同时取消上游模型调用）。
  * - 返回后做 CAS（`draftRev` + 文本双比对），草稿在往返期间被改过就丢弃结果。
  * - 成功后 `inputActions.setDraft(text)` 写回，并压入撤销栈。
- * - 撤销按钮只在栈非空时渲染；CAS 通过才回退，不通过时同一条记录连点两次强制还原。
- * - 撤销栈按会话隔离、深度 10、仅存活于插件生命周期（不进 React state，避免重挂载丢栈）。
+ * - 撤销按钮只在栈非空时渲染；CAS（"当前草稿仍等于 `after`"）通过才回退，
+ *   不通过时同一条记录连点两次强制还原。
+ * - 撤销栈按会话隔离、深度 10、最多保留 20 个会话（LRU：会话被删除时没有任何通知能到达插件）、
+ *   仅存活于插件生命周期（不进 React state，避免重挂载丢栈）。
  * - 草稿含芯片（`occurrences` 非空）或输入机非 `plain` 时拒绝发起。
+ *   （`occurrences` 只覆盖 `@引用` 芯片；`/命令` 是纯文本，不在其中。）
  */
 export interface BetterInputBehavior {
   /** 宿主路由。 */
   route: '/api/dsh-input-optimizer/optimize'
   /** 每会话撤销栈深度。 */
   maxUndo: 10
+  /** 同时保留撤销栈的会话数上限（LRU）。 */
+  maxUndoSessions: 20
   /** 生成中是否可取消。 */
   cancellable: true
 }
@@ -94,15 +99,26 @@ export interface BetterInputSettingsInjected {
       mode: 'host' | 'memory'
     }
     subscribe: (listener: () => void) => () => void
-    /** path ops 原子提交；宿主校验失败会 reject（消息可直接展示）。 */
+    /**
+     * path ops 原子提交。
+     *
+     * **注意**：宿主拒绝（revision 冲突 / schema+validate 不过）时**不会 reject**——
+     * 真实实现只 `recover()` 后正常返回，只有装配错误才抛。所以调用方必须自己核对
+     * 镜像里的值是否真的变了（设置页用 `opsApplied()` 做这件事），否则会假报"已保存"。
+     */
     mutate: (ops: ReadonlyArray<{ op: 'set' | 'unset', path: string[], value?: unknown }>, expectedRevision?: number) => Promise<void>
   }
   /** 本插件词典绑定。 */
   t: (key: string) => string
   /** 宿主只读路由门面。 */
   catalog: {
-    load: () => Promise<{ providers?: Array<{ id: string, name: string }>, effective?: Record<string, unknown> }>
+    load: () => Promise<{
+      providers?: Array<{ id: string, name: string }>
+      /** 设置命名空间状态：`available=false` 时 `reason` 是宿主侧原因（注册失败消息），用于排查。 */
+      settings?: { available?: boolean, reason?: string, section?: Record<string, unknown> }
+      effective?: Record<string, unknown>
+    }>
     models: (provider: string) => Promise<Array<{ id: string, name: string }>>
-    check: (provider: string, model: string) => Promise<{ ok?: boolean, message?: string, name?: string }>
+    check: (provider: string, model: string) => Promise<{ ok?: boolean, message?: string, name?: string, context?: number, defaultMaxTokens?: number }>
   }
 }

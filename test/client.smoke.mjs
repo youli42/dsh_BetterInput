@@ -93,11 +93,14 @@ let entry
 
 globalThis.window = {
   setTimeout: () => 0,
+  clearTimeout: () => {},
   __ModuleLoader__: { load: (loaded) => { entry = loaded } },
 }
 globalThis.document = {
   head: { append: (element) => { appendedStyles.push(element) } },
-  createElement: () => ({ id: '', textContent: '' }),
+  // 真 DOM 的元素一定有 `dataset`（插件用它给自己的 <style> 打 data-plugin 归属标记），
+  // 替身少这一层就会掩盖「样式会被别的插件认领走」这类问题。
+  createElement: () => ({ id: '', textContent: '', dataset: {} }),
   getElementById: (id) => appendedStyles.find(style => style.id === id) ?? null,
 }
 
@@ -144,10 +147,25 @@ function makeFakeScope(options = {}) {
         if (at >= 0) listeners.splice(at, 1)
       }
     },
+    /**
+     * 对齐真实的 `SettingsScopeController.mutate`：
+     * **宿主拒绝时不 reject**——它内部 `recover()`（重读宿主状态）之后正常返回；
+     * 只有装配错误（arity/未挂载方法/缺 Context adapter）才会抛。
+     * 所以这里分两个开关：`mutateRefuse` 模拟宿主拒绝（静默、值不变），
+     * `mutateFail` 模拟装配错误（抛）。
+     * @param {Array<object>} ops - path ops。
+     * @param {number} revision - 期望版本。
+     * @returns {Promise<void>} 完成。
+     */
     async mutate(ops, revision) {
       mutations.push({ ops, revision })
       if (options.mutateFail !== undefined) throw options.mutateFail
-      // 模拟宿主：把 ops 落到 value 上并推进 revision（供「保存后回到已保存态」验证）。
+      if (options.mutateRefuse === true) {
+        // 宿主拒绝：值不动，只把最新宿主状态重读一遍通知订阅者。
+        for (const listener of listeners) listener()
+        return
+      }
+      // 模拟宿主机接受：把 ops 落到 value 上并推进 revision（供「保存后回到已保存态」验证）。
       const value = { ...(snapshot.value ?? {}) }
       for (const op of ops) {
         const field = op.path[0]
@@ -279,8 +297,11 @@ async function tick(rounds = 6) {
 /**
  * 挂载一次组件：模块 → apply → 座位条目 → 组件。
  * 座位条目有两个（输入框按钮 + 设置页分区），这里按座位 key 取需要的那个。
+ *
+ * `options.shared` 用来复用**同一个 factory 作用域**（= 同一份模块级撤销栈）挂多个会话：
+ * 传同一个空对象进多次 mount 即可。不传时每次 mount 都是新模块实例（默认，最贴近"页面重载"）。
  * @param {{ draft?: string, phase?: string, sessionId?: string, primitives?: object, inputZone?: boolean,
- *   settings?: object }} options - 初始状态（settings 透传给假设置作用域）。
+ *   settings?: object, shared?: object }} options - 初始状态（settings 透传给假设置作用域）。
  * @returns {object} harness。
  */
 function mount(options = {}) {
@@ -294,10 +315,18 @@ function mount(options = {}) {
     occurrences: [],
   }
   const sessionId = options.sessionId ?? nextSessionId()
-  const fake = fakeCtx(options.settings ?? {})
-  entry.factory(requireShim(options.primitives ?? {})).apply(fake.ctx)
-  const composerEntry = fake.seat.find(item => item.key === SEAT)
-  const sectionEntry = fake.seat.find(item => item.key === 'settings.section')
+  const shared = options.shared ?? {}
+  if (shared.component === undefined) {
+    const fake = fakeCtx(options.settings ?? {})
+    entry.factory(requireShim(options.primitives ?? {})).apply(fake.ctx)
+    shared.component = fake.seat.find(item => item.key === SEAT)?.component
+    shared.section = fake.seat.find(item => item.key === 'settings.section')
+    shared.scope = fake.scope
+    shared.binds = fake.binds
+    shared.seat = fake.seat
+  }
+  const composerEntry = shared.component === undefined ? undefined : { component: shared.component }
+  const sectionEntry = shared.section
   assert.ok(composerEntry !== undefined, 'composer 座位条目必须注册')
   const component = composerEntry.component
   const written = []
@@ -339,9 +368,9 @@ function mount(options = {}) {
     truth,
     sessionId,
     written,
-    seat: fake.seat,
-    binds: fake.binds,
-    scope: fake.scope,
+    seat: shared.seat,
+    binds: shared.binds,
+    scope: shared.scope,
     section: sectionEntry,
     /** 改真值（模拟用户打字并被框架提交）。 */
     type(text) { truth.draft = text; truth.draftRev += 1 },
@@ -411,6 +440,7 @@ function mountSettings(options = {}) {
       writable: options.writable,
       mode: options.mode,
       mutateFail: options.mutateFail,
+      mutateRefuse: options.mutateRefuse,
     },
   })
   assert.ok(harness.section !== undefined, '设置分区条目必须注册')
@@ -479,6 +509,10 @@ await test('apply 注册词典、注入样式、把条目注册进模型左侧�
     '中英词典必须同键',
   )
   assert.equal(appendedStyles.length, 1, '样式应注入一次')
+  // 样式标签必须自带归属标记：不打标的话下一个物化的插件会在 claimStyles 里把它认领走，
+  // 那个插件 HMR 重载时按 style[data-plugin] 删除，本插件的样式就被顺手删掉。
+  assert.equal(appendedStyles[0].dataset.plugin, 'dsh-better-input')
+  assert.equal(appendedStyles[0].dataset.pluginCss, 'dsh-better-input/style.css')
   assert.deepEqual(
     seat.map(item => item.key).sort(),
     [SEAT, 'settings.section'].sort(),
@@ -600,7 +634,7 @@ await test('CAS：往返期间草稿被改 → 丢弃结果，不覆盖输入', 
   assert.equal(settled.noteTone, 'warn')
   assert.equal(settled.undo, null, '被丢弃的结果不入撤销栈')
 })
-await test('宿主错误：优先展示宿主 message；403/404 有专门文案', async () => {
+await test('宿主错误：优先展示宿主 message；403/404/405 有专门文案', async () => {
   const network = installFetch()
   const harness = mount({ draft: 'x' })
   const pending = harness.view().optimize.props.onClick()
@@ -623,6 +657,23 @@ await test('宿主错误：优先展示宿主 message；403/404 有专门文案'
   missing.respond({ status: 404, data: null })
   await pendingThree
   assert.equal(third.view().noteText, 'notMounted')
+
+  // 真机上宿主半没挂载时 POST 拿到的是 **405 空体**（SPA fallback 先拦非 GET/HEAD，
+  // 再去找文件），所以 405 必须和 404 一样映射到「路由未挂载」。
+  const unmounted = installFetch()
+  const fourth = mount({ draft: 'x' })
+  const pendingFour = fourth.view().optimize.props.onClick()
+  unmounted.respond({ status: 405, data: null })
+  await pendingFour
+  assert.equal(fourth.view().noteText, 'notMounted')
+
+  // 插件自己的 405 带 JSON message（"只接受 POST"），必须优先展示它而不是兜底文案。
+  const methodNotAllowed = installFetch()
+  const fifth = mount({ draft: 'x' })
+  const pendingFive = fifth.view().optimize.props.onClick()
+  methodNotAllowed.respond({ status: 405, data: { error: 'method-not-allowed', message: '只接受 POST' } })
+  await pendingFive
+  assert.equal(fifth.view().noteText, '只接受 POST')
 })
 await test('网络失败与空结果都有可读文案，且不入栈', async () => {
   const network = installFetch()
@@ -712,6 +763,28 @@ await test('撤销前草稿被手改：第一次点击只警告，第二次强�
   assert.equal(harness.view().noteText, 'undoneForced')
   assert.equal(harness.view().undo, null)
 })
+await test('撤销栈按会话数上限淘汰（会话被删时没有任何通知能到达插件）', async () => {
+  const SESSIONS = 21   // 超过 MAX_UNDO_SESSIONS(20)
+  // 同一个 factory 作用域（共享模块级撤销栈），每个会话一个组件实例。
+  const shared = {}
+  const first = mount({ draft: 's0 原文', sessionId: 's-0', shared })
+  const firstNetwork = installFetch()
+  const firstPending = first.view().optimize.props.onClick()
+  firstNetwork.respond({ data: { text: 's0 优化后' } })
+  await firstPending
+  assert.equal(first.view().undo !== null, true)
+
+  for (let index = 1; index < SESSIONS; index += 1) {
+    const session = mount({ draft: `s${String(index)} 原文`, sessionId: `s-${String(index)}`, shared })
+    const network = installFetch()
+    const pending = session.view().optimize.props.onClick()
+    network.respond({ data: { text: `s${String(index)} 优化后` } })
+    await pending
+  }
+  // 最久未使用的会话被淘汰：它的栈不再存在，撤销按钮消失（草稿本身不受影响）。
+  assert.equal(first.view().undo, null, '超出会话数上限后最旧的撤销栈应被丢弃')
+  assert.equal(first.truth.draft, 's0 优化后', '淘汰只影响撤销记录，不碰草稿')
+})
 await test('撤销栈深度上限 10（最旧的被丢弃）', async () => {
   const harness = mount({ draft: 'd0' })
   for (let index = 1; index <= 12; index += 1) {
@@ -730,16 +803,24 @@ await test('撤销栈深度上限 10（最旧的被丢弃）', async () => {
   assert.equal(harness.truth.draft, 'd2', '超出深度的最旧记录已丢弃')
 })
 await test('不同会话的撤销栈互不干扰', async () => {
+  // 必须共用同一个 factory 作用域（shared）：各自 mount 一个模块实例的话，
+  // 隔离只是"两个模块各自有一张 Map"这种平凡结论，测不出按会话分栈的逻辑。
+  const shared = {}
   const network = installFetch()
-  const first = mount({ draft: 'A 会话原文' })
+  const first = mount({ draft: 'A 会话原文', sessionId: 'session-A', shared })
   const pending = first.view().optimize.props.onClick()
   network.respond({ data: { text: 'A 会话优化后' } })
   await pending
   assert.equal(first.view().undo !== null, true)
 
-  const second = mount({ draft: 'B 会话原文' })
+  const second = mount({ draft: 'B 会话原文', sessionId: 'session-B', shared })
   assert.equal(second.view().undo, null, 'B 会话不该看到 A 的撤销记录')
   assert.equal(second.truth.draft, 'B 会话原文', 'B 会话草稿不得被 A 的撤销影响')
+
+  // A 撤销只动 A 的草稿。
+  await first.view().undo.props.onClick()
+  assert.equal(first.truth.draft, 'A 会话原文')
+  assert.equal(second.truth.draft, 'B 会话原文')
 })
 
 console.log('client half: 设置页')
@@ -838,18 +919,61 @@ await test('校验失败：不保存、逐字段给可读提示', async () => {
   assert.equal(after.noteText, 'settings.invalid')
   assert.equal(after.noteTone, 'error')
 })
-await test('宿主拒绝写入时，把宿主的消息原样带出来', async () => {
+await test('校验含上界（与宿主 validate 同值），超界在客户端就拦下', async () => {
+  // 旧客户端镜像只查下界：填 700000 会先过预校验、再由宿主拒绝，而 mutate 静默失败
+  // → 界面假报"已保存"。这里钉住上界必须在客户端也被拦住。
+  const page = mountSettings({ settingsValue: undefined })
+  let view = page.view()
+  view.inputs.get('timeoutMs').props.onChange({ target: { value: '700000' } })            // 超过 600000
+  view.inputs.get('maxOutputTokens').props.onChange({ target: { value: '200001' } })      // 超过 200000
+  view = page.view()
+  await view.action('save').props.onClick()
+
+  assert.equal(page.scope.mutations.length, 0, '超界不得发起写入')
+  assert.deepEqual(page.view().errors, ['settings.err.maxOutputTokens', 'settings.err.timeoutMs'])
+  assert.equal(page.view().noteText, 'settings.invalid')
+})
+await test('宿主拒绝写入时**不得**假报已保存（mutate 不会 reject）', async () => {
+  // 真实契约：宿主拒绝（revision 冲突 / schema+validate 不过）时 mutate 只是 recover 后返回，
+  // 既不抛错也不返回值。旧代码直接 await 就 flash('已保存')，用户以为存上了其实没有。
   const page = mountSettings({
     settingsValue: { systemPrompt: '旧' },
-    mutateFail: new Error('已启用自定义提示词，但提示词内容为空；请填写内容或关闭开关'),
+    mutateRefuse: true,
   })
   const view = page.view()
   view.inputs.get('systemPrompt').props.onChange({ target: { value: '新' } })
   await page.view().action('save').props.onClick()
+
   assert.equal(page.scope.mutations.length, 1, '确实发起了写入')
+  const after = page.view()
+  assert.equal(after.noteTone, 'error', '未生效必须是错误语气')
+  assert.equal(after.noteText.includes('settings.saveFailed'), true)
+  assert.equal(after.noteText.includes('settings.err.notApplied'), true)
+  assert.equal(after.noteText.includes('settings.saved'), false, '绝不能出现"已保存"')
+  assert.equal(after.inputs.get('systemPrompt').props.value, '新', '用户的编辑要保留，好让他重试')
+})
+await test('宿主拒绝恢复默认时同样不假报成功', async () => {
+  const page = mountSettings({
+    settingsValue: { systemPrompt: '旧' },
+    mutateRefuse: true,
+  })
+  await page.view().action('reset').props.onClick()
+  const after = page.view()
+  assert.equal(after.noteTone, 'error')
+  assert.equal(after.noteText.includes('settings.resetDone'), false)
+  assert.equal(after.noteText.includes('settings.err.notApplied'), true)
+})
+await test('装配错误（真 reject）时把错误消息带出来', async () => {
+  const page = mountSettings({
+    settingsValue: { systemPrompt: '旧' },
+    mutateFail: new Error('settings scope is not mounted'),
+  })
+  const view = page.view()
+  view.inputs.get('systemPrompt').props.onChange({ target: { value: '新' } })
+  await page.view().action('save').props.onClick()
   const note = page.view().noteText
-  assert.equal(note.includes('提示词内容为空'), true, '宿主消息必须出现在提示里')
-  assert.equal(page.view().noteTone, 'error')
+  assert.equal(note.includes('settings.saveFailed'), true)
+  assert.equal(note.includes('settings scope is not mounted'), true)
 })
 await test('恢复默认：对所有字段发 unset，回到默认与组合配置', async () => {
   const page = mountSettings({
@@ -893,6 +1017,29 @@ await test('可写性/可用性两态都有明确说明', () => {
   assert.equal(texts.includes('settings.unavailable'), true)
   assert.equal(texts.includes('settings.readonly'), true)
   assert.equal(node.props['data-dsh-bi-settings'], 'unavailable')
+})
+await test('不可用态要把宿主侧的原因一并显示（否则无从排查）', async () => {
+  const page = mountSettings({
+    settingsStatus: 'unavailable',
+    catalog: {
+      namespace: SETTINGS_NAMESPACE,
+      settings: { available: false, reason: 'settings: namespace conflict' },
+      providers: [],
+      effective: { provider: null, model: null, temperature: null, maxOutputTokens: 1024, timeoutMs: 30000 },
+    },
+  })
+  page.view()
+  await tick()                       // 目录请求落地
+  const view = page.view()
+  const texts = view.notes.map(note => childrenOf(note)[0])
+  assert.equal(texts.includes('settings.unavailable'), true, '笼统提示必须保留')
+  assert.equal(
+    texts.some(text => typeof text === 'string' && text.includes('settings.unavailableReason')
+      && text.includes('settings: namespace conflict')),
+    true,
+    '宿主给的原因必须照实显示出来',
+  )
+  assert.equal(view.node.props['data-dsh-bi-settings'], 'unavailable')
 })
 await test('模型目录：切 provider 会去拉该 provider 的模型，失败只提示不阻断', async () => {
   const page = mountSettings({ models: [{ id: 'm9', name: 'M9' }] })
