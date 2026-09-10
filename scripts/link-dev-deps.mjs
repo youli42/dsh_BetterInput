@@ -26,10 +26,9 @@ import { fileURLToPath } from 'node:url'
 import { resolveDshAnchor, resolvePackageDir } from './dsh-packages.mjs'
 
 /**
- * 需要在仓库内可见的宿主包：
+ * 跑测试/运行时**必须**能从仓库解析的宿主包：
  *   · dsh-llm / schemastery —— 插件自身的运行时导入；
- *   · cordis / dsh-settings / dsh-settings-file —— 真框架集成测试；
- *   · @types/node —— `npm run typecheck` 需要 node 全局类型（tsc 本身不在 dsh 里，见 README）。
+ *   · cordis / dsh-settings / dsh-settings-file —— 真框架集成测试。
  * react / react-dom 单独处理（必须版本配对，见文件末尾）。
  */
 const REQUIRED = [
@@ -38,8 +37,15 @@ const REQUIRED = [
   '@deepseek-ai/cordis',
   '@deepseek-ai/dsh-settings',
   '@deepseek-ai/dsh-settings-file',
-  '@types/node',
 ]
+
+/**
+ * 只有 `npm run typecheck` 用得上的包（tsc 本身不随 dsh 分发，见 README 的 P5.7b）。
+ * 它们**不参与**下面"已可从仓库解析就跳过链接"的判据：CI 不跑 typecheck，自然也不会装
+ * @types/node，一旦把它算进判据，CI 就会掉进"找 dsh 安装"那条分支、以 exit 1 收场
+ * （2026-09-10 CI 首跑 exit 1 的第二个原因）。链接时照旧一并链接。
+ */
+const TYPES_ONLY = ['@types/node']
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const nodeModules = join(repoRoot, 'node_modules')
@@ -104,6 +110,7 @@ const PAIRED = ['react', 'react-dom']
 
 // CI（以及"已手装 devDependencies"的机器）没有 dsh 安装：依赖直接从 registry 装进本仓库，
 // 此时解析已经没问题，链接这一步就该安静跳过，而不是报"找不到 dsh 安装"。
+// 判据只覆盖 REQUIRED + react 对：@types/node 只有 typecheck 用得上，缺它不算"跑不了测试"。
 if (unresolvedFromRepo([...REQUIRED, ...PAIRED]).length === 0) {
   console.log('link-dev-deps: 所有依赖都能从仓库解析（CI / 已装 devDependencies），跳过链接')
   process.exit(0)
@@ -140,7 +147,7 @@ function linkSpec(spec, target) {
   }
 }
 
-for (const spec of REQUIRED) {
+for (const spec of [...REQUIRED, ...TYPES_ONLY]) {
   try {
     linkSpec(spec, resolvePackageDir(anchor, spec))
   } catch (error) {

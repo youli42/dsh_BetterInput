@@ -474,6 +474,9 @@ npm run link-deps  # 手动补 dev 依赖链接（pretest 会自动跑）
 
 **CI**（`.github/workflows/ci.yml`）：Windows 上跑 lint + 约定守卫 + 四个套件，宿主依赖从 registry 装
 （CI 里没有 dsh 安装，`link-dev-deps` 会检测到"依赖已可从仓库解析"而安静跳过）。
+装完还会 `npm ls --depth=0` 再校验一次：npm 11 在某些 flag 下会**静默跳过**已在 `package.json` 里
+声明为 peer 的那几个包（退出码仍是 0），这道校验专门把这种"假绿"变成红灯——2026-09-10 CI 首跑
+exit 1 就是这么被放过去的（根因写在 workflow 的注释里）。
 CI 里的 react/react-dom 是 18.3.1，而本机那对是 19.2.8——真 React 套件因此**同时覆盖两个大版本**。
 
 **typecheck 为何还没上（P5.7b）**：`tsconfig.json` + `checkJs` 是对症的（最近两轮多个缺陷是"类型判错/契约判错"），

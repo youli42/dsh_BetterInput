@@ -16,19 +16,30 @@ jobs:
   verify:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      # 两个 action 都停在 v5（= 首批声明 `runs.using: node24` 的主版本），用来消掉"目标 Node.js 20、
+      # 被强制跑在 Node.js 24 上"的弃用警告：v4 声明的是 node20，Node 20 于 2026-09-23 从 runner 移除。
+      # 只升到 v5、不追 v6/v7：checkout v6 起改掉了 `pull_request_target` 的检出默认值（改成需显式
+      # `allow-unsafe-pr-checkout`），本工作流只用 push/pull_request 虽然不受影响，但没必要为消警告
+      # 多引入一个变量；setup-node v5 的自动缓存只在 package.json 有 `packageManager` 字段时生效，
+      # 本仓库没有该字段，所以缓存行为没有变化。v5 要求 runner ≥ v2.327.1，托管 runner 远高于此。
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '24'
 
       # CI 里没有 dsh 安装（本机是从 profile 软链宿主包的），所以从 registry 装齐宿主依赖。
-      # `--legacy-peer-deps`：仓库声明的 react peer 是 ^18.2.0（那是 shell 提供的版本），
-      # 这里装的 18.3.1 与之兼容，但 npm 的 peer 解析仍会挑剔，直接跳过它。
+      # ⚠️ 这里**不能**加 `--legacy-peer-deps`（2026-09-10 CI 首跑 exit 1 的根因）：
+      #    npm 11 在该 flag 下会**静默跳过**"命令行点名、但又在 package.json 的 peerDependencies 里
+      #    出现过"的包——@deepseek-ai/dsh-llm 与 react 就这么被丢了，退出码仍是 0，本步看起来是绿的；
+      #    直到 `pretest` 的 link-dev-deps 既解析不到宿主包、又找不到 dsh 安装，才以 exit 1 把 verify 拖红。
+      #    实测（同一份 package.json、同一台 Windows / Node 24 / npm 11.13）：带该 flag 只装进 16 个包且缺
+      #    dsh-llm（`npm test` 随之 exit 1）；去掉后装进 28 个包、react/react-dom 精确配成 18.3.1，
+      #    且没有 ERESOLVE——react 18.3.1 本来就满足 peer 声明的 ^18.2.0，本来不需要跳过 peer 解析。
       # ⚠️ 版本按"验证过的那一版 dsh"写死；dsh 升级后这几行要跟着调。
       - name: 安装宿主依赖与工具
         run: >
-          npm install --no-save --legacy-peer-deps --no-audit --no-fund
+          npm install --no-save --no-audit --no-fund
           @deepseek-ai/dsh-llm@0.1.2-rc.1
           @deepseek-ai/schemastery@^3
           @deepseek-ai/cordis@^4
@@ -37,6 +48,14 @@ jobs:
           react@18.3.1
           react-dom@18.3.1
           @biomejs/biome@^2.5.8
+
+      # 上一步一旦重回"静默跳过"模式（换 flag、换 npm 版本都可能），这里必须红，
+      # 而不是把问题一路推到测试步骤里那句容易被误读的"找不到 dsh 安装"。
+      # `npm ls` 只校验 package.json 里声明过的依赖，而被静默跳过的恰好就是那三个 peer
+      # （@deepseek-ai/dsh-llm / react / @deepseek-ai/schemastery）：装齐时 exit 0（多出来的
+      # extraneous 条目不算错），缺任何一个都 exit 1。
+      - name: 校验宿主依赖真的装进来了
+        run: npm ls --depth=0
 
       - name: lint（Biome，只 lint 不 format）
         run: npm run lint
