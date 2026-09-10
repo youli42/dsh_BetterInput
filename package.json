@@ -44,8 +44,10 @@
     "link-deps": "node scripts/link-dev-deps.mjs",
     "lint": "node scripts/lint.mjs",
     "format": "node scripts/lint.mjs --write --formatter-enabled=true",
+    "guards": "node scripts/check-guards.mjs",
     "pretest": "node scripts/link-dev-deps.mjs",
-    "test": "node test/smoke.mjs && node test/client.smoke.mjs && node test/settings-activation.mjs"
+    "test": "node scripts/check-guards.mjs && node test/smoke.mjs && node test/client.smoke.mjs && node test/client.react.mjs && node test/settings-activation.mjs",
+    "verify": "npm run lint && npm test"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.8"

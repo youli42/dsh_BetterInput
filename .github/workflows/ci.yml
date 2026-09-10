@@ -1,0 +1,48 @@
+name: verify
+
+# 只跑"本机已经验证过"的检查：lint（Biome）、约定守卫、四个 node 套件。
+# 刻意**没有** typecheck：本机没有 tsc、也没有网络可安装，塞一个未校准的配置只会让 CI 首跑就红。
+# 补法见 README「工程化」一节（P5.7b）。
+#
+# 平台选 windows-latest：这些套件是在 Windows 上开发并验证的（含 `link-dev-deps` 的
+# junction 处理），先保证"跑过的那套环境是绿的"；Linux 覆盖留到确认过再说。
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # CI 里没有 dsh 安装（本机是从 profile 软链宿主包的），所以从 registry 装齐宿主依赖。
+      # `--legacy-peer-deps`：仓库声明的 react peer 是 ^18.2.0（那是 shell 提供的版本），
+      # 这里装的 18.3.1 与之兼容，但 npm 的 peer 解析仍会挑剔，直接跳过它。
+      # ⚠️ 版本按"验证过的那一版 dsh"写死；dsh 升级后这几行要跟着调。
+      - name: 安装宿主依赖与工具
+        run: >
+          npm install --no-save --legacy-peer-deps --no-audit --no-fund
+          @deepseek-ai/dsh-llm@0.1.2-rc.1
+          @deepseek-ai/schemastery@^3
+          @deepseek-ai/cordis@^4
+          @deepseek-ai/dsh-settings@0.1.2-rc.1
+          @deepseek-ai/dsh-settings-file@0.1.2-rc.1
+          react@18.3.1
+          react-dom@18.3.1
+          @biomejs/biome@^2.5.8
+
+      - name: lint（Biome，只 lint 不 format）
+        run: npm run lint
+
+      # `npm test` 会先跑约定守卫，再跑宿主半 / 浏览器半 / 真 React / 真框架集成四个套件。
+      # pretest 的 link-dev-deps 在 CI 里会发现依赖已可从仓库解析，安静跳过。
+      # 顺带一提：CI 用的是 react 18（本机那对是 19），所以真 React 套件在两条版本上都跑。
+      - name: 测试
+        run: npm test

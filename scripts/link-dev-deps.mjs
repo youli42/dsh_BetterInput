@@ -18,7 +18,8 @@
  * 用法：node scripts/link-dev-deps.mjs   （`npm test` 前会自动跑一遍）
  */
 
-import { existsSync, lstatSync, mkdirSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -26,7 +27,10 @@ import { resolveDshAnchor, resolvePackageDir } from './dsh-packages.mjs'
 
 /**
  * 需要在仓库内可见的宿主包：
- *   前两个是插件自身的运行时导入，后三个给集成测试加载真实框架用。
+ *   · dsh-llm / schemastery —— 插件自身的运行时导入；
+ *   · cordis / dsh-settings / dsh-settings-file —— 真框架集成测试；
+ *   · @types/node —— `npm run typecheck` 需要 node 全局类型（tsc 本身不在 dsh 里，见 README）。
+ * react / react-dom 单独处理（必须版本配对，见文件末尾）。
  */
 const REQUIRED = [
   '@deepseek-ai/dsh-llm',
@@ -34,6 +38,7 @@ const REQUIRED = [
   '@deepseek-ai/cordis',
   '@deepseek-ai/dsh-settings',
   '@deepseek-ai/dsh-settings-file',
+  '@types/node',
 ]
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -73,11 +78,43 @@ function link(linkPath, target) {
   return entry === undefined ? 'created' : 'replaced'
 }
 
+/**
+ * 仓库内是否已经能解析全部所需包（CI 用 `npm install` 装了真依赖时就是这种情况）。
+ * @param {string[]} specs - 包名列表。
+ * @returns {string[]} 仍解析不到的包名。
+ */
+function unresolvedFromRepo(specs) {
+  const require = createRequire(join(repoRoot, '__probe__.cjs'))
+  return specs.filter((spec) => {
+    try {
+      require.resolve(spec)
+      return false
+    } catch {
+      try {
+        require.resolve(`${spec}/package.json`)
+        return false
+      } catch {
+        return true
+      }
+    }
+  })
+}
+
+const PAIRED = ['react', 'react-dom']
+
+// CI（以及"已手装 devDependencies"的机器）没有 dsh 安装：依赖直接从 registry 装进本仓库，
+// 此时解析已经没问题，链接这一步就该安静跳过，而不是报"找不到 dsh 安装"。
+if (unresolvedFromRepo([...REQUIRED, ...PAIRED]).length === 0) {
+  console.log('link-dev-deps: 所有依赖都能从仓库解析（CI / 已装 devDependencies），跳过链接')
+  process.exit(0)
+}
+
 const anchor = resolveDshAnchor()
 if (anchor === undefined) {
   console.error(
     'link-dev-deps: 找不到 dsh 安装（无法解析 @deepseek-ai/dsh-llm）。\n' +
       '  · 已安装 dsh 时，请确认 dsh 的安装目录在 nvm 或 ~/.dsh 下；\n' +
+      '  · 在 CI 里请先 `npm install` 需要的宿主包；\n' +
       '  · 也可显式指定：$env:DSH_INSTALL_ANCHOR = "<含 node_modules 的目录>"。',
   )
   process.exit(1)
@@ -86,15 +123,49 @@ if (!existsSync(nodeModules)) mkdirSync(nodeModules, { recursive: true })
 
 console.log(`link-dev-deps: anchor = ${anchor}`)
 let failures = 0
-for (const spec of REQUIRED) {
+
+/**
+ * 建一个链接（spec → 某个包目录），失败只计数不中断其余包。
+ * @param {string} spec - 包名（决定链接路径）。
+ * @param {string} target - 目标包目录。
+ * @returns {void}
+ */
+function linkSpec(spec, target) {
   try {
-    const target = resolvePackageDir(anchor, spec)
-    const linkPath = join(nodeModules, ...spec.split('/'))
-    const action = link(linkPath, target)
+    const action = link(join(nodeModules, ...spec.split('/')), target)
     console.log(`  ${action.padEnd(8)} ${spec} -> ${target}`)
   } catch (error) {
     failures += 1
     console.error(`  FAIL     ${spec}: ${error instanceof Error ? error.message : String(error)}`)
   }
 }
+
+for (const spec of REQUIRED) {
+  try {
+    linkSpec(spec, resolvePackageDir(anchor, spec))
+  } catch (error) {
+    failures += 1
+    console.error(`  FAIL     ${spec}: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+// react 与 react-dom **必须版本配对**，否则 React 19 的 DOM 包会直接抛
+// "Incompatible React versions"。dsh 安装里 hoisted react 是 18.x，而 react-dom 只存在于
+// 某个包自己的嵌套目录（同级带一份同版本 react），所以按"react-dom 的同级 react"成对链接，
+// 而不是各自独立解析（那样会链成 18 + 19 的错配）。
+try {
+  const reactDomDir = resolvePackageDir(anchor, 'react-dom')
+  const reactDir = join(dirname(reactDomDir), 'react')
+  if (!existsSync(join(reactDir, 'package.json'))) {
+    throw new Error('react-dom 同级的 react 不存在，无法组成版本一致的渲染对')
+  }
+  const version = JSON.parse(readFileSync(join(reactDomDir, 'package.json'), 'utf8')).version
+  linkSpec('react', reactDir)
+  linkSpec('react-dom', reactDomDir)
+  console.log(`  （react/react-dom 配对为 ${String(version)}）`)
+} catch (error) {
+  failures += 1
+  console.error(`  FAIL     react/react-dom 配对: ${error instanceof Error ? error.message : String(error)}`)
+}
+
 if (failures > 0) process.exit(1)

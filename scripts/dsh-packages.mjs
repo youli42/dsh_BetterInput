@@ -79,7 +79,16 @@ export function resolveDshAnchor() {
  */
 export function resolvePackageEntry(anchor, spec) {
   const require = createRequire(join(anchor, '__resolve__.cjs'))
-  return realpathSync(require.resolve(spec))
+  try {
+    return realpathSync(require.resolve(spec))
+  } catch (error) {
+    // 纯类型包（`@types/*`）没有 main 入口，`resolve(spec)` 必然失败——改用 package.json 定位。
+    try {
+      return realpathSync(require.resolve(`${spec}/package.json`))
+    } catch {
+      throw error
+    }
+  }
 }
 
 /**
