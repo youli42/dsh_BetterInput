@@ -59,16 +59,50 @@ export interface BetterInputBehavior {
 }
 
 /** 需要就绪的客户端服务。 */
-export declare const inject: readonly ['slots', 'locale']
+export declare const inject: readonly ['slots', 'locale', 'settingsScope']
 
 /**
- * 浏览器半入口。
+ * 浏览器半入口：注册输入框按钮（`conversation.input.right`）与设置页分区（`settings.section`）。
  * @param ctx - 浏览器端 cordis 上下文。
  */
 export declare function apply(ctx: unknown): void
 
-/** 宿主路由（与宿主半 lib/policy.js 的 ROUTE 一致）。 */
+/** 宿主路由（与宿主半 lib/policy.js 的一组常量一致）。 */
 export declare const ROUTE = '/api/dsh-input-optimizer/optimize'
+export declare const ROUTE_CATALOG = '/api/dsh-input-optimizer/catalog'
+export declare const ROUTE_CATALOG_MODELS = '/api/dsh-input-optimizer/catalog/models'
+export declare const ROUTE_CHECK = '/api/dsh-input-optimizer/check'
 
 /** 座位 key：模型选择器紧左边。 */
 export declare const SEAT = 'conversation.input.right'
+
+/** 设置页在设置面板导航里的条目 id。 */
+export declare const SETTINGS_SECTION_ID = 'better-input'
+
+/**
+ * 设置页的注入面（注册时 `inject` 工厂返回的对象会摊成组件 props）：
+ * `props.settings` / `props.t` / `props.catalog`。
+ */
+export interface BetterInputSettingsInjected {
+  /** 绑定到 `better-input` 命名空间的设置作用域（读快照、订阅、mutate）。 */
+  settings: {
+    getSnapshot: () => {
+      status: 'loading' | 'ready' | 'unavailable'
+      value: Partial<Record<string, unknown>> | undefined
+      revision: number | undefined
+      writable: boolean
+      mode: 'host' | 'memory'
+    }
+    subscribe: (listener: () => void) => () => void
+    /** path ops 原子提交；宿主校验失败会 reject（消息可直接展示）。 */
+    mutate: (ops: ReadonlyArray<{ op: 'set' | 'unset', path: string[], value?: unknown }>, expectedRevision?: number) => Promise<void>
+  }
+  /** 本插件词典绑定。 */
+  t: (key: string) => string
+  /** 宿主只读路由门面。 */
+  catalog: {
+    load: () => Promise<{ providers?: Array<{ id: string, name: string }>, effective?: Record<string, unknown> }>
+    models: (provider: string) => Promise<Array<{ id: string, name: string }>>
+    check: (provider: string, model: string) => Promise<{ ok?: boolean, message?: string, name?: string }>
+  }
+}

@@ -51,15 +51,29 @@ const fakeReact = {
   useState(initial) {
     const index = cursor++
     hookSlots[index] ??= typeof initial === 'function' ? initial() : initial
-    return [hookSlots[index], next => { hookSlots[index] = next }]
+    // 支持函数式更新（组件里 setForm(current => ...) / setStackVersion(v => v + 1) 都靠它）。
+    return [hookSlots[index], next => { hookSlots[index] = typeof next === 'function' ? next(hookSlots[index]) : next }]
   },
   useRef(initial) {
     const index = cursor++
     hookSlots[index] ??= { current: initial }
     return hookSlots[index]
   },
-  useEffect() {
-    cursor += 1
+  /**
+   * 带 deps 的 useEffect 替身：首次渲染跑一次，deps 变化时重跑并先执行上一次的清理。
+   * （不是 React 的提交语义，但足以驱动订阅/拉目录这类挂载副作用，并让「切 provider 重拉模型」
+   * 这类依赖驱动的行为可测。）
+   */
+  useEffect(effect, deps) {
+    const index = cursor++
+    const slot = hookSlots[index] ??= { deps: undefined, cleanup: undefined }
+    const previous = slot.deps
+    const changed = deps === undefined || previous === undefined || deps.length !== previous.length
+      || deps.some((value, position) => value !== previous[position])
+    if (!changed) return
+    if (typeof slot.cleanup === 'function') slot.cleanup()
+    slot.deps = deps
+    slot.cleanup = effect() ?? undefined
   },
 }
 
@@ -99,12 +113,64 @@ const requireShim = (primitives) => (spec) => {
 /* ── 假 ctx：捕获词典与座位注册 ───────────────────────────────────────── */
 
 /**
- * 造一个假客户端 ctx。
- * @returns {{ ctx: object, seat: object[], dictionaries: object[] }} ctx 与观测点。
+ * 造一个假设置作用域（对齐 ctx.settingsScope.bind 的契约）。
+ * @param {object} options - 替身参数。
+ * @returns {object} 假 scope。
  */
-function fakeCtx() {
+function makeFakeScope(options = {}) {
+  const mutations = []
+  const listeners = []
+  let snapshot = {
+    status: options.settingsStatus ?? 'ready',
+    value: options.settingsValue,
+    base: {},
+    user: {},
+    revision: options.settingsRevision ?? 7,
+    writable: options.writable !== false,
+    mode: options.mode ?? 'host',
+  }
+  return {
+    mutations,
+    /** 直接改快照（模拟远端提交），并通知订阅者。 */
+    publish(next) {
+      snapshot = { ...snapshot, ...next }
+      for (const listener of listeners) listener()
+    },
+    getSnapshot: () => snapshot,
+    subscribe(listener) {
+      listeners.push(listener)
+      return () => {
+        const at = listeners.indexOf(listener)
+        if (at >= 0) listeners.splice(at, 1)
+      }
+    },
+    async mutate(ops, revision) {
+      mutations.push({ ops, revision })
+      if (options.mutateFail !== undefined) throw options.mutateFail
+      // 模拟宿主：把 ops 落到 value 上并推进 revision（供「保存后回到已保存态」验证）。
+      const value = { ...(snapshot.value ?? {}) }
+      for (const op of ops) {
+        const field = op.path[0]
+        if (op.op === 'set') value[field] = op.value
+        else delete value[field]
+      }
+      const next = { ...snapshot, value, revision: snapshot.revision + 1 }
+      snapshot = next
+      for (const listener of listeners) listener()
+    },
+  }
+}
+
+/**
+ * 造一个假客户端 ctx。
+ * @param {object} options - 替身参数（透传给假设置作用域）。
+ * @returns {{ ctx: object, seat: object[], dictionaries: object[], binds: object[], scope: object }} ctx 与观测点。
+ */
+function fakeCtx(options = {}) {
   const seat = []
   const dictionaries = []
+  const binds = []
+  const scope = makeFakeScope(options)
   const ctx = {
     effect(factory) {
       return factory()
@@ -113,15 +179,22 @@ function fakeCtx() {
       body({
         slots: {
           inject: (_key, callback) => callback(),
-          register: (options, component) => { seat.push({ key: options.name, options, component }) },
+          register: (registerOptions, component) => { seat.push({ key: registerOptions.name, options: registerOptions, component }) },
+        },
+        settingsScope: {
+          bind(spec) {
+            binds.push(spec)
+            return scope
+          },
         },
       })
     },
     locale: {
       register: (namespace, dictionary) => { dictionaries.push({ namespace, dictionary }); return () => {} },
+      bind: () => (key) => key,
     },
   }
-  return { ctx, seat, dictionaries }
+  return { ctx, seat, dictionaries, binds, scope }
 }
 
 /* ── fetch 替身：可悬挂、可结算、可取消 ────────────────────────────────── */
@@ -195,11 +268,25 @@ let sessionCounter = 0
 const nextSessionId = () => `session-${String(++sessionCounter)}`
 
 /**
+ * 让微任务队列跑空：驱动「拉取目录/模型」这类挂载副作用的落地。
+ * @param {number} rounds - 轮数。
+ * @returns {Promise<void>} 完成。
+ */
+async function tick(rounds = 6) {
+  for (let index = 0; index < rounds; index += 1) await Promise.resolve()
+}
+
+/**
  * 挂载一次组件：模块 → apply → 座位条目 → 组件。
- * @param {{ draft?: string, phase?: string, sessionId?: string, primitives?: object, inputZone?: boolean }} options - 初始状态。
+ * 座位条目有两个（输入框按钮 + 设置页分区），这里按座位 key 取需要的那个。
+ * @param {{ draft?: string, phase?: string, sessionId?: string, primitives?: object, inputZone?: boolean,
+ *   settings?: object }} options - 初始状态（settings 透传给假设置作用域）。
  * @returns {object} harness。
  */
 function mount(options = {}) {
+  // 每次挂载都是新实例：hook 槽位必须清空，否则同一用例里第二次 mount 会读到上一个组件的状态。
+  hookSlots.length = 0
+  cursor = 0
   const truth = {
     draft: options.draft ?? '帮我写个脚本',
     phase: options.phase ?? 'plain',
@@ -207,9 +294,12 @@ function mount(options = {}) {
     occurrences: [],
   }
   const sessionId = options.sessionId ?? nextSessionId()
-  const { ctx, seat } = fakeCtx()
-  entry.factory(requireShim(options.primitives ?? {})).apply(ctx)
-  const component = seat[0].component
+  const fake = fakeCtx(options.settings ?? {})
+  entry.factory(requireShim(options.primitives ?? {})).apply(fake.ctx)
+  const composerEntry = fake.seat.find(item => item.key === SEAT)
+  const sectionEntry = fake.seat.find(item => item.key === 'settings.section')
+  assert.ok(composerEntry !== undefined, 'composer 座位条目必须注册')
+  const component = composerEntry.component
   const written = []
 
   /** 渲染一次：从真值生成新快照（模拟框架给组件的会话标准道具）。 */
@@ -249,6 +339,10 @@ function mount(options = {}) {
     truth,
     sessionId,
     written,
+    seat: fake.seat,
+    binds: fake.binds,
+    scope: fake.scope,
+    section: sectionEntry,
     /** 改真值（模拟用户打字并被框架提交）。 */
     type(text) { truth.draft = text; truth.draftRev += 1 },
     setOccurrences(list) { truth.occurrences = list },
@@ -258,6 +352,111 @@ function mount(options = {}) {
 
 const SEAT = 'conversation.input.right'
 const ROUTE = '/api/dsh-input-optimizer/optimize'
+const ROUTE_CATALOG = '/api/dsh-input-optimizer/catalog'
+const ROUTE_CATALOG_MODELS = '/api/dsh-input-optimizer/catalog/models'
+const ROUTE_CHECK = '/api/dsh-input-optimizer/check'
+const SETTINGS_NAMESPACE = 'better-input'
+
+/* ── 设置页 harness：假 scope + 假目录路由 ─────────────────────────────── */
+
+/**
+ * 装一个按路径应答的 fetch 替身（设置页用）。
+ * @param {{ catalog?: object, models?: object[], check?: object, failCatalog?: boolean }} options - 响应内容。
+ * @returns {{ calls: object[] }} 观测点。
+ */
+function installSettingsFetch(options = {}) {
+  const calls = []
+  const respond = (data, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => data })
+  globalThis.fetch = async (url, init) => {
+    calls.push({
+      url,
+      method: init?.method ?? 'GET',
+      body: init?.body === undefined ? undefined : JSON.parse(init.body),
+    })
+    if (url.startsWith(ROUTE_CATALOG_MODELS)) return respond({ models: options.models ?? [{ id: 'm1', name: 'M1' }] })
+    if (url === ROUTE_CATALOG) {
+      if (options.failCatalog === true) return respond({}, 500)
+      return respond(options.catalog ?? {
+        namespace: SETTINGS_NAMESPACE,
+        settings: { available: true, section: {} },
+        providers: [{ id: 'acme', name: 'Acme' }, { id: 'deepseek-official', name: 'DeepSeek' }],
+        effective: {
+          provider: null,
+          model: null,
+          temperature: null,
+          maxOutputTokens: 1024,
+          timeoutMs: 30000,
+          sources: { prompt: 'default', model: 'none', temperature: 'default', limits: 'default' },
+        },
+      })
+    }
+    if (url === ROUTE_CHECK) return respond(options.check ?? { ok: true, provider: 'acme', model: 'm1', name: 'Acme M1' })
+    return respond({}, 404)
+  }
+  return { calls }
+}
+
+/**
+ * 把设置页组件渲染出来（走真实注册路径拿组件与注入面）。
+ * @param {{ settingsValue?: object, settingsStatus?: string, writable?: boolean, mutateFail?: Error,
+ *   mode?: string, catalog?: object, models?: object[], check?: object, failCatalog?: boolean }} options - 参数。
+ * @returns {object} 视图与观测点。
+ */
+function mountSettings(options = {}) {
+  const network = installSettingsFetch(options)
+  const harness = mount({
+    settings: {
+      settingsValue: options.settingsValue,
+      settingsStatus: options.settingsStatus,
+      writable: options.writable,
+      mode: options.mode,
+      mutateFail: options.mutateFail,
+    },
+  })
+  assert.ok(harness.section !== undefined, '设置分区条目必须注册')
+  const face = harness.section.options.inject()
+
+  /** 渲染一次（允许调用多次模拟重渲染）。 */
+  const view = () => {
+    cursor = 0
+    const node = harness.section.component(face)
+    const inputs = new Map()
+    const buttons = []
+    const notes = []
+    const errors = []
+    const datalists = new Map()
+    /** 递归收集（元素是嵌套的：按钮在 .dsh-bi-actions 里，datalist 在 fieldset 里）。 */
+    const walk = (element) => {
+      if (element === null || typeof element !== 'object') return
+      const className = typeof element.props?.className === 'string' ? element.props.className : ''
+      if (element.props?.['data-dsh-bi-field'] !== undefined) inputs.set(element.props['data-dsh-bi-field'], element)
+      if (element.props?.['data-dsh-bi-action'] !== undefined) buttons.push(element)
+      if (className.includes('dsh-bi-note')) notes.push(element)
+      if (className === 'dsh-bi-error') errors.push(childrenOf(element)[0])
+      if (element.type === 'datalist' && typeof element.props.id === 'string') datalists.set(element.props.id, element)
+      for (const child of childrenOf(element)) walk(child)
+    }
+    walk(node)
+    return {
+      node,
+      face,
+      buttons,
+      inputs,
+      errors,
+      notes,
+      datalists,
+      noteText: notes.length === 0 ? null : childrenOf(notes[notes.length - 1])[0],
+      noteTone: notes.length === 0 ? null : notes[notes.length - 1].props['data-tone'],
+      action(name) {
+        const button = buttons.find(item => item.props['data-dsh-bi-action'] === name)
+        assert.ok(button !== undefined, `action ${name} must exist`)
+        return button
+      },
+    }
+  }
+
+  return { harness, network, view, face, scope: harness.scope, binds: harness.binds }
+}
 
 console.log('client half: bundle 包装与插件契约')
 await test('bundle id 必须等于包名，factory 返回 apply/inject', () => {
@@ -266,7 +465,7 @@ await test('bundle id 必须等于包名，factory 返回 apply/inject', () => {
   assert.equal(entry.id, pkg.name, 'bundle id 必须等于包名')
   const exports = entry.factory(requireShim({}))
   assert.equal(typeof exports.apply, 'function')
-  assert.deepEqual([...exports.inject], ['slots', 'locale'])
+  assert.deepEqual([...exports.inject], ['slots', 'locale', 'settingsScope'])
 })
 await test('apply 注册词典、注入样式、把条目注册进模型左侧座位', () => {
   const { ctx, seat, dictionaries } = fakeCtx()
@@ -280,9 +479,12 @@ await test('apply 注册词典、注入样式、把条目注册进模型左侧�
     '中英词典必须同键',
   )
   assert.equal(appendedStyles.length, 1, '样式应注入一次')
-  assert.equal(seat.length, 1)
-  assert.equal(seat[0].key, SEAT, '必须注册进 conversation.input.right（模型紧左边）')
-  const options = seat[0].options
+  assert.deepEqual(
+    seat.map(item => item.key).sort(),
+    [SEAT, 'settings.section'].sort(),
+    '两个条目：输入框按钮 + 设置页分区',
+  )
+  const options = seat.find(item => item.key === SEAT).options
   assert.equal(options.id, 'better-input', 'list 座位必须给 id')
   assert.equal(typeof options.order, 'number')
   assert.equal(options.locale, 'inputOptimizer')
@@ -538,6 +740,201 @@ await test('不同会话的撤销栈互不干扰', async () => {
   const second = mount({ draft: 'B 会话原文' })
   assert.equal(second.view().undo, null, 'B 会话不该看到 A 的撤销记录')
   assert.equal(second.truth.draft, 'B 会话原文', 'B 会话草稿不得被 A 的撤销影响')
+})
+
+console.log('client half: 设置页')
+await test('注册进 settings.section，并按命名空间绑定设置作用域', () => {
+  const harness = mount({})
+  assert.deepEqual(harness.binds, [{ namespace: SETTINGS_NAMESPACE }])
+  assert.equal(harness.section.options.id, 'better-input')
+  assert.equal(typeof harness.section.options.order, 'number')
+  assert.equal(harness.section.options.label(), 'settings.nav', 'label 必须是可解析的 thunk')
+  const face = harness.section.options.inject()
+  assert.equal(face.settings, harness.scope, '注入面必须给出绑定的设置作用域')
+  assert.equal(typeof face.catalog.load, 'function')
+  assert.equal(typeof face.catalog.models, 'function')
+  assert.equal(typeof face.catalog.check, 'function')
+})
+await test('未配置时表单显示为空，且不报错（回落到默认）', () => {
+  const page = mountSettings({ settingsValue: undefined })
+  const view = page.view()
+  assert.equal(view.inputs.get('customPromptEnabled').props.checked, false)
+  assert.equal(view.inputs.get('systemPrompt').props.value, '')
+  assert.equal(view.inputs.get('modelProvider').props.value, '')
+  assert.equal(view.inputs.get('modelId').props.value, '')
+  assert.equal(view.errors.length, 0, '未配置不该有校验错误')
+  assert.equal(view.action('save').props.disabled, false)
+  // 首屏拉了目录，并展示「当前生效」一行
+  assert.equal(page.network.calls.some(call => call.url === ROUTE_CATALOG), true)
+})
+await test('已保存的配置会被回填（刷新页面后仍然显示）', () => {
+  const page = mountSettings({
+    settingsValue: {
+      customPromptEnabled: true,
+      systemPrompt: '我的提示词',
+      modelProvider: 'acme',
+      modelId: 'm1',
+      temperature: 0.4,
+      maxOutputTokens: 2048,
+      timeoutMs: 15000,
+    },
+  })
+  const view = page.view()
+  assert.equal(view.inputs.get('customPromptEnabled').props.checked, true)
+  assert.equal(view.inputs.get('systemPrompt').props.value, '我的提示词')
+  assert.equal(view.inputs.get('modelProvider').props.value, 'acme')
+  assert.equal(view.inputs.get('modelId').props.value, 'm1')
+  assert.equal(view.inputs.get('temperature').props.value, '0.4')
+  assert.equal(view.inputs.get('maxOutputTokens').props.value, '2048')
+  assert.equal(view.inputs.get('timeoutMs').props.value, '15000')
+})
+await test('改动后保存：只发变化的字段，带 revision，原子提交', async () => {
+  const page = mountSettings({ settingsValue: { modelProvider: 'acme', modelId: 'm1' } })
+  let view = page.view()
+  view.inputs.get('systemPrompt').props.onChange({ target: { value: '新提示词' } })
+  view.inputs.get('customPromptEnabled').props.onChange({ target: { checked: true } })
+  view.inputs.get('temperature').props.onChange({ target: { value: '0.2' } })
+  view = page.view()
+  await view.action('save').props.onClick()
+
+  assert.equal(page.scope.mutations.length, 1)
+  const { ops, revision } = page.scope.mutations[0]
+  assert.equal(revision, 7, '必须带读到的 revision（版本栅栏）')
+  assert.deepEqual(ops, [
+    { op: 'set', path: ['customPromptEnabled'], value: true },
+    { op: 'set', path: ['systemPrompt'], value: '新提示词' },
+    { op: 'set', path: ['temperature'], value: 0.2 },
+  ])
+  assert.equal(page.view().noteText, 'settings.saved')
+  assert.equal(page.view().noteTone, 'ok')
+})
+await test('没有改动时保存不发请求，只提示', async () => {
+  const page = mountSettings({ settingsValue: { systemPrompt: '不变的' } })
+  await page.view().action('save').props.onClick()
+  assert.equal(page.scope.mutations.length, 0)
+  assert.equal(page.view().noteText, 'settings.noChange')
+})
+await test('校验失败：不保存、逐字段给可读提示', async () => {
+  const page = mountSettings({ settingsValue: undefined })
+  let view = page.view()
+  view.inputs.get('customPromptEnabled').props.onChange({ target: { checked: true } })   // 开了开关但没写内容
+  view.inputs.get('modelProvider').props.onChange({ target: { value: 'acme' } })          // 只填了 provider
+  view.inputs.get('temperature').props.onChange({ target: { value: '9' } })               // 越界
+  view.inputs.get('maxOutputTokens').props.onChange({ target: { value: '1.5' } })         // 非整数
+  view.inputs.get('timeoutMs').props.onChange({ target: { value: '10' } })                // 太小
+  view = page.view()
+  await view.action('save').props.onClick()
+
+  assert.equal(page.scope.mutations.length, 0, '校验不通过绝不能写')
+  const after = page.view()
+  assert.deepEqual(after.errors, [
+    'settings.err.promptEmpty',
+    'settings.err.modelPair',
+    'settings.err.modelPair',
+    'settings.err.temperature',
+    'settings.err.maxOutputTokens',
+    'settings.err.timeoutMs',
+  ])
+  assert.equal(after.noteText, 'settings.invalid')
+  assert.equal(after.noteTone, 'error')
+})
+await test('宿主拒绝写入时，把宿主的消息原样带出来', async () => {
+  const page = mountSettings({
+    settingsValue: { systemPrompt: '旧' },
+    mutateFail: new Error('已启用自定义提示词，但提示词内容为空；请填写内容或关闭开关'),
+  })
+  const view = page.view()
+  view.inputs.get('systemPrompt').props.onChange({ target: { value: '新' } })
+  await page.view().action('save').props.onClick()
+  assert.equal(page.scope.mutations.length, 1, '确实发起了写入')
+  const note = page.view().noteText
+  assert.equal(note.includes('提示词内容为空'), true, '宿主消息必须出现在提示里')
+  assert.equal(page.view().noteTone, 'error')
+})
+await test('恢复默认：对所有字段发 unset，回到默认与组合配置', async () => {
+  const page = mountSettings({
+    settingsValue: { customPromptEnabled: true, systemPrompt: 'x', modelProvider: 'acme', modelId: 'm1' },
+  })
+  await page.view().action('reset').props.onClick()
+  assert.equal(page.scope.mutations.length, 1)
+  const { ops } = page.scope.mutations[0]
+  assert.equal(ops.length, 7)
+  assert.equal(ops.every(op => op.op === 'unset'), true)
+  assert.deepEqual(ops.map(op => op.path[0]).sort(), [
+    'customPromptEnabled', 'maxOutputTokens', 'modelId', 'modelProvider', 'systemPrompt', 'temperature', 'timeoutMs',
+  ].sort())
+  assert.equal(page.view().noteText, 'settings.resetDone')
+})
+await test('远端提交后（未在编辑）表单会同步成新值', async () => {
+  const page = mountSettings({ settingsValue: { systemPrompt: '旧值' } })
+  assert.equal(page.view().inputs.get('systemPrompt').props.value, '旧值')
+  page.scope.publish({ value: { systemPrompt: '远端改了' } })
+  assert.equal(page.view().inputs.get('systemPrompt').props.value, '远端改了')
+})
+await test('可写性/可用性两态都有明确说明', () => {
+  const readOnly = mountSettings({ settingsValue: {}, writable: false })
+  const readOnlyView = readOnly.view()
+  assert.equal(readOnlyView.action('save').props.disabled, true)
+  assert.equal(readOnlyView.inputs.get('systemPrompt').props.disabled, true)
+  assert.equal(readOnlyView.notes.some(note => childrenOf(note)[0] === 'settings.readonly'), true)
+
+  const unavailable = mount({ settings: { settingsStatus: 'unavailable', mode: 'memory' } })
+  cursor = 0
+  const node = unavailable.section.component(unavailable.section.options.inject())
+  const texts = []
+  const collect = (element) => {
+    if (element === null || typeof element !== 'object') return
+    if (typeof element.props?.className === 'string' && element.props.className.includes('dsh-bi-note')) {
+      texts.push(childrenOf(element)[0])
+    }
+    for (const child of childrenOf(element)) collect(child)
+  }
+  collect(node)
+  assert.equal(texts.includes('settings.unavailable'), true)
+  assert.equal(texts.includes('settings.readonly'), true)
+  assert.equal(node.props['data-dsh-bi-settings'], 'unavailable')
+})
+await test('模型目录：切 provider 会去拉该 provider 的模型，失败只提示不阻断', async () => {
+  const page = mountSettings({ models: [{ id: 'm9', name: 'M9' }] })
+  let view = page.view()
+  view.inputs.get('modelProvider').props.onChange({ target: { value: 'acme' } })
+  view = page.view()   // 依赖变化 → 触发拉取（异步）
+  await tick()
+  view = page.view()   // 拉取落地后的重渲染
+  const url = page.network.calls.map(call => call.url).find(item => item.startsWith(ROUTE_CATALOG_MODELS))
+  assert.equal(url, `${ROUTE_CATALOG_MODELS}?provider=acme`)
+  const datalist = view.datalists.get('dsh-bi-models')
+  assert.ok(datalist !== undefined, '模型下拉候选必须渲染')
+  assert.equal(childrenOf(datalist)[0].props.value, 'm9')
+
+  const broken = mountSettings({ failCatalog: true })
+  broken.view()
+  await tick()                 // 目录失败是异步落地
+  const brokenView = broken.view()
+  assert.equal(brokenView.errors.includes('settings.err.loadCatalog'), true, '目录失败要提示且可手填')
+  assert.equal(brokenView.inputs.get('modelId').props.disabled, false, '手填仍然可用')
+})
+await test('测试按钮：走宿主试调路由，成功失败都有可读结论', async () => {
+  const okPage = mountSettings({ settingsValue: { modelProvider: 'acme', modelId: 'm1' } })
+  await okPage.view().action('test').props.onClick()
+  const checkCall = okPage.network.calls.find(call => call.url === ROUTE_CHECK)
+  assert.deepEqual(checkCall.body, { provider: 'acme', model: 'm1' })
+  assert.equal(okPage.view().noteText.includes('settings.model.testOk'), true)
+
+  const badPage = mountSettings({
+    settingsValue: { modelProvider: 'acme', modelId: 'nope' },
+    check: { ok: false, message: 'unknown model' },
+  })
+  await badPage.view().action('test').props.onClick()
+  const badNote = badPage.view().noteText
+  assert.equal(badNote.includes('settings.model.testFail'), true)
+  assert.equal(badNote.includes('unknown model'), true)
+  assert.equal(badPage.view().noteTone, 'error')
+
+  const missingPage = mountSettings({ settingsValue: {} })
+  await missingPage.view().action('test').props.onClick()
+  assert.equal(missingPage.network.calls.some(call => call.url === ROUTE_CHECK), false, '缺字段不该发请求')
+  assert.equal(missingPage.view().noteText, 'settings.err.modelPair')
 })
 
 console.log('')

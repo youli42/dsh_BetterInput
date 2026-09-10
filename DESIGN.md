@@ -23,17 +23,18 @@
 
 ---
 
-## 0.5 实施进展（P0 + P1 + P2 + P3 已交付）
+## 0.5 实施进展（P0–P4 已交付）
 
 | 文件 | 作用 |
 |---|---|
 | `package.json` | 双半声明（`main` + `exports["./client"]` + `dsh.client` / `dsh.bundle.patch`） |
 | `cordis.patch.yml` | 把自己 insert 进插件树，内含唯一的配置入口 |
-| `lib/policy.js` | 零依赖策略层：配置校验、信任围栏、提示词拼装、JSON 收发 |
-| `lib/index.js` | 宿主半：`ctx.webServer` 路由 + `ctx.llm.stream()` + `BlockAssembler` |
-| `lib/client.js` | 浏览器半：座位注册 + 优化/撤销按钮 + CAS + 撤销栈（手写 bundle，无构建步骤） |
-| `lib/types/*.d.ts` | 对外契约类型（含组件行为契约） |
-| `test/smoke.mjs`（16 例）、`test/client.smoke.mjs`（18 例） | 共 34 例，全绿 |
+| `lib/policy.js` | 零依赖策略层：配置校验、信任围栏、**生效配置解析**、JSON 收发 |
+| `lib/settings.js` | 宿主半：设置命名空间 schema + 跨字段 `validate` |
+| `lib/index.js` | 宿主半：4 条路由（optimize / catalog / catalog-models / check）+ `ctx.llm.stream()` |
+| `lib/client.js` | 浏览器半：输入框按钮 + CAS + 撤销栈 + **设置页**（手写 bundle，无构建步骤） |
+| `lib/types/*.d.ts` | 对外契约类型（含组件行为契约、设置段字段） |
+| `test/smoke.mjs`（29 例）、`test/client.smoke.mjs`（32 例） | 共 61 例，全绿 |
 
 **验收证据**：P0 已在 Web GUI 目视确认——按 README 的方式 A 装入 profile 后，按钮出现在输入框工具行右侧、模型选择器紧左边（2026-09-10）。P1 的路由尚未在真实宿主上 curl 过（单测用假 LLM 流覆盖了全部分支）；P2/P3 的浏览器半行为由 18 个用例覆盖。
 
@@ -54,6 +55,25 @@
 7. **可测性驱动分层**：`lib/policy.js` 刻意零 `@deepseek-ai` 依赖，因此宿主半能用假 ctx 驱动**真实**
    路由处理器（真的 `createUserMessage` / `BlockAssembler`，只把 `ctx.llm.stream` 换成替身）；
    浏览器半用极小 React 替身 + 「真值 / 每次渲染新快照」的 harness，能真实复现「往返期间草稿被改 → CAS 失败」。
+
+### P4（设置页）的实现选择与理由
+
+8. **配置读写走 dsh 标准设置通道，而不是自造存储**：宿主 `ctx.settings.register('better-input', schema, { applies: 'live', validate })`，
+   客户端 `ctx.settingsScope.bind({ namespace })`。收益是白拿四件事——持久化（`dsh-settings-file` 落到
+   `$DSH_HOME/settings.yaml`）、宿主校验、版本栅栏（写入带 revision，冲突会拒绝）、双端一致（同一份文档镜像）。
+   自造 JSON 文件或 localStorage 都要自己实现这四件事，且「重启/刷新后仍在」会变成我自己的责任。
+9. **设置段刻意扁平**：客户端 `SettingsScope.set(field, value)` 只接受命名空间内的标量字段，嵌套结构得拼
+   path ops。扁平让「保存」既保持原子（一次 `mutate(ops, revision)`）又不必写路径。
+10. **除 `customPromptEnabled` 外一律不给 schema 默认值**：未设置 = `undefined` = 回落到组合配置/内置默认。
+    「未配置时使用默认模型与默认提示词，且不报错」这条要求就落在 `effectiveConfig(config, undefined)`
+    与加设置页之前**逐字节相同**（有专门用例守着）。
+11. **跨字段校验放 `validate`，不放 schema**：`validate` 抛错即**拒绝这次写入**（调用方在 `mutate` 处收到消息），
+    而 schema 同时也是配置界面渲染与「段缺失时的解析」依据——把跨字段规则塞进 schema 会连这两件事一起改。
+    客户端的预校验是同一套规则的**镜像**（客户端 bundle 不能相对 import policy.js），靠「同一批夹具两边结论一致」的用例防漂移。
+12. **目录与试调走插件自己的只读路由**：provider/模型列表与 `resolveModelInfo` 是宿主 LLM 服务的知识，
+    客户端没有等价服务；这三条路由与 optimize 共用同一套信任围栏与体积上限。
+13. **新增 `temperature` 到组合配置键**：原先只能配 `maxOutputTokens`/`timeoutMs`；温度是「调用参数」里最常调的一个。
+    只在显式配置时下传（`...temperature === undefined ? {} : { temperature }`），未配置行为不变。
 
 ---
 
@@ -504,8 +524,8 @@ window.__ModuleLoader__.load({
 | **P1** 宿主路由 | `/api/dsh-input-optimizer/optimize` + 固定 system prompt + `ctx.llm.stream` | ✅ 已实现（16 例绿；真实 curl 待确认） |
 | **P2** 前后端接线 | 读 `input.draft` → POST → `setDraft` + CAS + 取消 + 失败提示 | ✅ 已实现（含 stale 丢弃、403/404/网络/空结果文案） |
 | **P3** 撤销 | 撤销栈 + CAS + 撤销按钮 + `draftRev` 校验 | ✅ 已实现（含二次点击强制还原、10 层深度、按会话隔离） |
-| **P4** 提示词自定义 | L1 配置已完成（含 `presets`）；再做客户端 `GET /config` + 预设菜单 | ⬜ 部分待做 |
-| **P5** 打磨 | 流式回填、芯片保留（`insertReference` 重建）、vitest 化单测 | ⬜ 待做 |
+| **P4** 提示词与模型配置页 | 设置面板分区（`settings.section`）：模型 + 调用参数 + 提示词，持久化 + 即时生效 + 校验 | ✅ 已实现（`applies: 'live'`；落 `settings.yaml`；设置页 12 条用例覆盖校验/持久化回填/不可用态） |
+| **P5** 打磨 | 预设菜单、流式回填、芯片保留（`insertReference` 重建）、vitest 化单测 | ⬜ 待做 |
 
 ---
 

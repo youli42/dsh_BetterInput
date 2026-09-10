@@ -12,10 +12,10 @@ DSH Web GUI 插件：在**模型选择器左侧**加一个「AI 优化输入」�
 | P1 | 宿主半：`/api/dsh-input-optimizer/optimize` + `ctx.llm.stream()` 一次性调用 | ✅ 已实现 |
 | P2 | 前后端接线：读草稿 → POST → `setDraft` + CAS + 取消 + 失败提示 | ✅ 已实现 |
 | P3 | 撤销栈 + CAS 校验 + 撤销按钮（含强制还原、10 层深度） | ✅ 已实现 |
-| P4 | 预设菜单 UI（`GET /config` 下发 + `conversation.input.overlay` 浮层） | ⬜ 待做（宿主侧 `presets` 已可用） |
-| P5 | 流式回填、芯片保留、vitest 化 | ⬜ 待做 |
+| P4 | 设置页：配置模型（名称 + 调用参数）与提示词，持久化并即时生效 | ✅ 已实现 |
+| P5 | 流式回填、芯片保留、预设菜单、vitest 化 | ⬜ 待做 |
 
-单测：宿主半 16 例 + 浏览器半 18 例，全绿。
+单测：宿主半 29 例 + 浏览器半 32 例，全绿。
 
 > 本机安装记录（2026-09-10，即下面的方式 A）：`dsh plugin --profile web add link:D:\SSDWP\AI\dsh\BetterInput`，
 > 并把 `"dsh-better-input"` 加进 `~/.dsh/profiles/web/package.json` 的 `dsh.profile.bundles`。
@@ -24,13 +24,14 @@ DSH Web GUI 插件：在**模型选择器左侧**加一个「AI 优化输入」�
 
 ```
 package.json          双半声明：main(lib/index.js) + exports["./client"] + dsh.client/bundle
-cordis.patch.yml      bundle patch：把自己 insert 进 profile 插件树（唯一配置入口）
-lib/index.js          宿主半：路由 + LLM 调用（import @deepseek-ai/dsh-llm）
-lib/policy.js         策略层：零依赖，配置校验/信任围栏/提示词拼装（可独立单测）
-lib/client.js         浏览器半：座位注册 + 按钮组件（window.__ModuleLoader__ 工厂，手写无需构建）
+cordis.patch.yml      bundle patch + 组合层配置（设置页的用户值优先于它）
+lib/index.js          宿主半：4 条路由 + LLM 一次性调用
+lib/settings.js       宿主半：设置命名空间 schema 与跨字段校验
+lib/policy.js         策略层：零依赖，配置校验/信任围栏/生效配置解析（可独立单测）
+lib/client.js         浏览器半：输入框按钮 + 撤销栈 + 设置页（手写 __ModuleLoader__ bundle，无需构建）
 lib/types/*.d.ts      对外类型
-test/smoke.mjs        宿主半冒烟测试（16 例）
-test/client.smoke.mjs 浏览器半冒烟测试（18 例：含 P2 接线与 P3 撤销栈）
+test/smoke.mjs        宿主半冒烟测试（29 例）
+test/client.smoke.mjs 浏览器半冒烟测试（32 例：含 P2 接线、P3 撤销栈、P4 设置页）
 DESIGN.md             设计依据：座位/接口证据、撤销方案、提示词分层、风险清单
 LICENSE               MIT
 ```
@@ -91,8 +92,8 @@ curl.exe -s -X POST http://127.0.0.1:3080/api/dsh-input-optimizer/optimize `
 3. **单测**：
 
 ```powershell
-node test\smoke.mjs          # 宿主半 16 例：配置、围栏、路由全链路（含超时/截断/错误码）
-node test\client.smoke.mjs   # 浏览器半 18 例：座位注册、组件契约、P2 接线、P3 撤销栈
+node test\smoke.mjs          # 宿主半 29 例：生效配置、围栏、四路由全链路（含超时/截断/错误码/目录/试调）
+node test\client.smoke.mjs   # 浏览器半 32 例：座位注册、组件契约、P2 接线、P3 撤销栈、P4 设置页
 ```
 
 > 宿主半测试需要 `@deepseek-ai/dsh-llm` 可见。装进 profile 后天然可见；在本目录直接跑测试时，
@@ -124,21 +125,53 @@ node test\client.smoke.mjs   # 浏览器半 18 例：座位注册、组件契约
 
 提示文本用 GUI 的设计令牌上色（`--dsw-alias-state-{success,warn,error}-primary`），令牌缺失时回落 `currentColor`。
 
+## 设置页（设置 → 输入优化）
+
+设置面板左侧导航里多一项「输入优化」，用来配置这个按钮**用哪个模型、哪段提示词**。
+
+| 区域 | 能配什么 | 说明 |
+|---|---|---|
+| 提示词 | 「使用自定义提示词」开关 + 提示词正文 | 开关关闭时用插件配置的 `systemPrompt`，再往下才是内置文案 |
+| 模型 | Provider + 模型名称 | 两个输入框都带候选（datalist）：目录来自宿主已注册的适配器；目录为空或想用未列出的模型时**直接手填**。旁边有「测试」按钮，走宿主 `resolveModelInfo` 只做解析校验，不发真实请求、不产生费用 |
+| 调用参数 | Temperature、输出 token 上限、超时（毫秒） | 留空 = 用适配器/组合配置/内置默认 |
+| 操作 | 保存 / 测试 / 恢复默认 | 「恢复默认」清空本页所有用户设置，回到内置默认与组合配置 |
+
+**生效优先级**：内置默认 ← `cordis.patch.yml` 的 `config`（组合层）← 设置页（用户层）。
+设置页保存后**下一次优化即生效**（宿主每次请求现读解析后的配置），不需要重启或刷新。
+
+**持久化**：走 dsh 标准设置通道——宿主 `ctx.settings.register('better-input', schema)`，文档由
+`dsh-settings-file` 落在 `$DSH_HOME/settings.yaml`。所以「重启应用 / 刷新页面后配置仍在」是框架保证的：
+本插件不自造存储，也不自己拼配置文件。
+
+**校验**：客户端先行预校验（逐字段给中文提示，不合法就连写入都不会发出），宿主再用 schemastery schema
++ 跨字段 `validate` 复核；宿主的拒绝消息会原样展示在保存按钮旁。典型规则：
+
+- 启用了自定义提示词但内容为空 → 拒绝；
+- Provider 与模型名称只填了一个 → 拒绝（要么都填，要么都留空用默认）；
+- Temperature 不在 0–2、输出上限 < 1、超时 < 1000 ms、非整数 → 拒绝。
+
+**未配置时**：全部字段留空即可——宿主回落到默认模型（`agentDefaultModel.currentSelection()`）与
+默认提示词，不报错。若部署没挂设置提供者，设置页会显示「设置服务不可用」，而优化按钮照常工作。
+
 ## 配置参考（`cordis.patch.yml` 的 `config:`）
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `enabled` | `true` | 总开关；`false` 时不挂路由 |
-| `systemPrompt` | 内置（见 `lib/policy.js`） | 优化用的 system prompt |
-| `model.provider` / `model.model` | 省略 | 固定模型路由；**必须成对出现**。省略则用宿主当前默认选择（`agentDefaultModel.currentSelection()`） |
-| `presets[].{id,label,prompt}` | `[]` | 预设；调用方用 `presetId` 选择，其 `prompt` 追加到 system |
+| `systemPrompt` | 内置（见 `lib/policy.js`） | **默认**提示词；设置页启用自定义提示词时被覆盖 |
+| `model.provider` / `model.model` | 省略 | 固定模型路由；**必须成对出现**。被设置页覆盖；都没配时用宿主当前默认选择 |
+| `presets[].{id,label,prompt}` | `[]` | 预设；请求带 `presetId` 时其 `prompt` 追加到 system |
 | `maxInputChars` | `8000` | 输入字数上限（超限 400） |
 | `maxOutputTokens` | `1024` | 输出 token 上限（截断仍返回文本并标 `truncated: true`） |
 | `timeoutMs` | `30000` | 单次调用超时（超时 504） |
+| `temperature` | 不传 | 采样温度（缺省交给适配器决定） |
 
-未知字段名或类型错误会让**启动失败并报出字段名**（fail loud，避免「拼错字段却以为生效了」）。改完 `cordis.patch.yml` 需要重启 `dsh web`（`patchReload: live` 会重载 patch，但插件自身的 Node 代码不热重载）。
+未知字段名或类型错误会让**启动失败并报出字段名**（fail loud，避免「拼错字段却以为生效了」）。
+这项配置是**组合层**：设置页里的用户值优先于它，改它需要重启 `dsh web`（`patchReload: live` 会重载 patch，但插件自身的 Node 代码不热重载）。
 
 ## HTTP 契约
+
+配置的**读写不走这些路由**（走标准设置通道），这里是能力路由与设置页的只读支撑路由：
 
 ```
 POST /api/dsh-input-optimizer/optimize
@@ -151,9 +184,26 @@ body: { text: string, sessionId?: string, presetId?: string }
 413 { error: 'body-too-large' }
 502 { error: 'no-model-route' | 'model-failed', message }
 504 { error: 'timeout' }
+
+GET  /api/dsh-input-optimizer/catalog
+200 { namespace, settings: { available, section }, providers: [{id,name}],
+      effective: { provider, model, temperature, maxOutputTokens, timeoutMs,
+                   sources: { prompt, model, temperature, limits } } }
+
+GET  /api/dsh-input-optimizer/catalog/models?provider=<id>
+200 { provider, models: [{id,name}] }        // 适配器没有目录时 models 为空数组，不是错误
+400 { error: 'missing-provider', message }
+
+POST /api/dsh-input-optimizer/check
+body: { provider: string, model: string }
+200 { ok: true, provider, model, name, context?, defaultMaxTokens? }
+200 { ok: false, provider, model, message }  // 解析不了的原因（不发真实请求、不计费）
+400 { error: 'missing-model', message }
 ```
 
-安全：只服务本机浏览器（socket 属于 `127/8`/`::1`/`::ffff:127/8` **且** Host 头是本机名 **且** 无跨站标记；永不信任 `X-Forwarded-For`）。请求体上限 256 KiB，调用超时与客户端断开都会取消上游。
+安全：三条路由与能力路由共用同一套信任围栏——只服务本机浏览器（socket 属于 `127/8`/`::1`/`::ffff:127/8`
+**且** Host 头是本机名 **且** 无跨站标记；永不信任 `X-Forwarded-For`）。请求体上限 256 KiB，
+调用超时与客户端断开都会取消上游。
 
 ## 开发循环
 
@@ -162,7 +212,9 @@ body: { text: string, sessionId?: string, presetId?: string }
 - **宿主半**：改 `lib/index.js` / `lib/policy.js` 需要重启 `dsh web`。
 - 每次改完先跑两个 smoke 测试，再动 GUI。
 
-## 下一步（P4 / P5）
+## 下一步（P5）
 
-- **P4 提示词自定义的图形化**：宿主侧 `presets` 已可用（`presetId` 追加 system），缺的是前端菜单。客户端读不到插件配置（见 `DESIGN.md` R-10），所以要加一条 `GET /config` 下发预设列表，再把菜单挂在 `conversation.input.overlay`（composer 卡片内浮层座位）。
-- **P5 打磨**：流式回填（把宿主改成 SSE 或分块返回）、芯片保留（研究 `insertReference` 重建而非拉平）、把两个 smoke 套件迁到 vitest、多语言词典扩充。
+- **预设菜单**：宿主侧 `presets` 已生效（请求带 `presetId` 即在 system 后追加该预设的 prompt），缺的是把预设列表下发到设置页/输入框旁的菜单（客户端读不到插件配置，见 `DESIGN.md` R-10，所以要么走 `catalog` 路由带出来，要么把预设也纳入设置命名空间）。
+- **流式回填**：把 `POST /optimize` 改成分块/SSE，边生成边显示。
+- **芯片保留**：草稿含 `@引用`/`/命令` 时目前直接拒绝（整体 `setDraft` 会拉平芯片），后续可研究用 `insertReference` 重建。
+- **测试迁移**：两个 smoke 套件迁到 vitest（参照 `packages/client/*/tests/*.client.spec.tsx` 的写法）。
