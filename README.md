@@ -16,9 +16,12 @@ DSH Web GUI 插件：在**模型选择器左侧**加一个「AI 优化输入」�
 | P5.0 | 可运行性：dev 依赖软链脚本 + 真机安装验收 | ✅ 已实现（2026-09-11） |
 | P5.1 | 缺陷修复：日志全丢、`/check` 契约判型、未知终态误判失败、405 误报、保存假成功、组合层区间、样式归属 | ✅ 已实现（2026-09-11） |
 | P5.1b | **真机事故**：设置页恒显示「设置服务不可用」——命名空间注册是激活时读一次，输给了 settings 服务就绪的竞态 | ✅ 已修复（2026-09-11，含真框架集成测试） |
-| P5.2–P5.7 | 规则单一来源、预设菜单、并发配额、流式回填、工程化、芯片保留 | ⬜ 待做（见「下一步」） |
+| P5.2 | 规则单一来源：区间/上限/预设由 `/catalog` 下发，客户端不再维护会漂移的镜像 | ✅ 已实现（2026-09-11） |
+| P5.3 | 预设菜单：输入框旁 ▾ 菜单，选中后请求带 `presetId` | ✅ 已实现（2026-09-11） |
+| P5.4 | 信任判定改走框架 `ctx.connection.requestRejection()`（能力路由要浏览器会话） | ✅ 已实现（2026-09-11） |
+| P5.5–P5.7 | 并发配额、流式回填、工程化、芯片保留 | ⬜ 待做（见「下一步」） |
 
-测试：宿主半 36 例 + 浏览器半 37 例 + 真框架集成 3 例，全绿
+测试：宿主半 39 例 + 浏览器半 42 例 + 真框架集成 3 例，全绿
 （`npm test`，会先自动补齐 dev 依赖链接）。
 
 > **运行前提**：仓库里没有 `node_modules` 时，`npm test` 与 `link:` 方式安装后的运行时都跑不起来
@@ -32,12 +35,12 @@ cordis.patch.yml      bundle patch + 组合层配置（设置页的用户值优�
 lib/index.js          宿主半：4 条路由 + LLM 一次性调用
 lib/settings.js       宿主半：设置命名空间 schema 与跨字段校验
 lib/policy.js         策略层：零依赖，配置校验/信任围栏/生效配置解析（可独立单测）
-lib/client.js         浏览器半：输入框按钮 + 撤销栈 + 设置页（手写 __ModuleLoader__ bundle，无需构建）
+lib/client.js         浏览器半：输入框按钮 + 预设菜单 + 撤销栈 + 设置页（手写 __ModuleLoader__ bundle，无需构建）
 lib/types/*.d.ts      对外类型
 scripts/dsh-packages.mjs  定位 dsh 安装与其中的宿主包（脚本与集成测试共用）
 scripts/link-dev-deps.mjs 把宿主的 @deepseek-ai/* 软链进本仓库（`npm test` 前自动跑）
-test/smoke.mjs        宿主半冒烟测试（36 例）
-test/client.smoke.mjs 浏览器半冒烟测试（37 例：含接线、撤销栈、设置页、样式归属、撤销栈上限）
+test/smoke.mjs        宿主半冒烟测试（39 例）
+test/client.smoke.mjs 浏览器半冒烟测试（42 例：接线、预设菜单、宿主下发规则、撤销栈、设置页）
 test/settings-activation.mjs 真框架集成测试（3 例：用真实 cordis + 真实 settings 提供者钉住注册时机）
 DESIGN.md             设计依据：座位/接口证据、撤销方案、提示词分层、风险清单
 LICENSE               MIT
@@ -123,12 +126,27 @@ curl.exe -s http://127.0.0.1:3080/api/dsh-input-optimizer/catalog
    与 `better-input: settings namespace "better-input" registered`。
    设置页保存后 `$DSH_HOME/settings.yaml` 里应出现 `better-input:` 段，`catalog` 的
    `sources.*` 也从 `config`/`default` 变为 `settings`。
-4. **测试**：
+4. **P5.3（预设菜单）**：`cordis.patch.yml` 的 `presets` 非空时，✨ 右侧出现 `▾`；
+   展开后点某一项 → 请求体里带 `presetId`（可用 DevTools 的 Network 面板确认）。
+   没配预设时 `▾` 不出现，界面与从前一致。
+5. **P5.4（宿主会话）**：`POST /optimize` 需要浏览器会话（页面 cookie 由 `dsh web` 打印的
+   带 token 的 URL 换取）。命令行只做排查时用只读路由：
+
+```powershell
+curl.exe -s http://127.0.0.1:3080/api/dsh-input-optimizer/catalog        # 元数据：免会话（仅环回）
+curl.exe -s -X POST http://127.0.0.1:3080/api/dsh-input-optimizer/check `
+  -H 'content-type: application/json' -d '{"provider":"leihuo","model":"deepseek-v4.1-flash"}'
+# POST /optimize 不带 cookie 会得到 401 unauthorized（这是有意的：凭据可能来自环境变量，
+# 本机其它进程不该能借这条路由花掉它）。要从命令行调它，就把浏览器 DevTools →
+# Application → Cookies 里那条 dsh 会话 cookie 用 `-b "<name>=<value>"` 带上。
+```
+
+6. **测试**：
 
 ```powershell
 npm test                          # 先自动补 dev 依赖链接，再跑三个套件
-node test\smoke.mjs               # 宿主半 36 例：生效配置、围栏、四路由全链路、注册时机（含"晚到"）
-node test\client.smoke.mjs        # 浏览器半 37 例：座位注册、组件契约、接线、撤销栈、设置页
+node test\smoke.mjs               # 宿主半 39 例：生效配置、信任判定、四路由全链路、注册时机
+node test\client.smoke.mjs        # 浏览器半 42 例：座位、预设菜单、宿主下发规则、撤销栈、设置页
 node test\settings-activation.mjs # 真框架集成 3 例：真实 cordis + 真实 settings 提供者，钉住注册时机
 ```
 
@@ -143,6 +161,8 @@ node test\settings-activation.mjs # 真框架集成 3 例：真实 cordis + 真�
 | 场景 | 行为 |
 |---|---|
 | 点击 ✨ | `POST /api/dsh-input-optimizer/optimize`（body `{ text, sessionId }`），成功后 `setDraft` 写回 |
+| 预设菜单（`▾`） | 只在宿主配了 `presets` 时出现；选中后请求带 `presetId`，宿主把该预设的 prompt 追加到 system。菜单向上弹出，点外面或 Esc 收起 |
+| 草稿超过宿主上限 | 本地直接提示「草稿过长（n/上限）」，不发请求（上限来自 `/catalog` 的 `limits`） |
 | 生成中再点 | **取消**（abort；宿主侧同时取消上游模型调用，不产生费用累积） |
 | 生成中用户继续打字 | 返回时 CAS（`draftRev` + 文本双比对）失败 → **丢弃结果**，提示「草稿已变化」 |
 | 成功后 | 出现 ↶ 撤销按钮；提示 3 秒后自动消失 |
@@ -209,7 +229,7 @@ node test\settings-activation.mjs # 真框架集成 3 例：真实 cordis + 真�
 | `enabled` | `true` | 总开关；`false` 时不挂路由 |
 | `systemPrompt` | 内置（见 `lib/policy.js`） | **默认**提示词；设置页启用自定义提示词时被覆盖 |
 | `model.provider` / `model.model` | 省略 | 固定模型路由；**必须成对出现**。被设置页覆盖；都没配时用宿主当前默认选择 |
-| `presets[].{id,label,prompt}` | `[]` | 预设；请求带 `presetId` 时其 `prompt` 追加到 system |
+| `presets[].{id,label,prompt}` | `[]` | 预设；请求带 `presetId` 时其 `prompt` 追加到 system。`id`/`label` 会经 `/catalog` 下发到输入框旁的 `▾` 菜单（`prompt` 不下发） |
 | `maxInputChars` | `8000` | 输入字数上限（超限 400） |
 | `maxOutputTokens` | `1024` | 输出 token 上限，**取值域 1–200000**（截断仍返回文本并标 `truncated: true`） |
 | `timeoutMs` | `30000` | 单次调用超时，**取值域 1000–600000 ms**（超时 504） |
@@ -229,6 +249,7 @@ body: { text: string, sessionId?: string, presetId?: string }
 
 200 { text, modelUsed: { provider, model }, presetId?, truncated? }
 400 { error: 'bad-request' | 'empty-text' | 'text-too-long' | 'unknown-preset', message }
+401 { error: 'unauthorized', message }        // 缺浏览器会话（见下「安全」）
 403 { error: 'forbidden' }
 405 { error: 'method-not-allowed' }
 413 { error: 'body-too-large' }
@@ -237,7 +258,11 @@ body: { text: string, sessionId?: string, presetId?: string }
 504 { error: 'timeout' }
 
 GET  /api/dsh-input-optimizer/catalog
-200 { namespace, settings: { available, section }, providers: [{id,name}],
+200 { namespace,
+      settings: { available, reason?, section },
+      providers: [{id,name}],
+      limits: { maxInputChars, temperature:{min,max}, maxOutputTokens:{min,max}, timeoutMs:{min,max} },
+      presets: [{id,label}],                  // prompt 不下发；客户端不再自己维护规则镜像
       effective: { provider, model, temperature, maxOutputTokens, timeoutMs,
                    sources: { prompt, model, temperature, limits } } }
 
@@ -254,13 +279,22 @@ body: { provider: string, model: string }
 400 { error: 'missing-model', message }
 ```
 
-安全：三条路由与能力路由共用同一套信任围栏——只服务本机浏览器（socket 属于 `127/8`/`::1`/`::ffff:127/8`
-**且** Host 头是本机名 **且** 无跨站标记；永不信任 `X-Forwarded-For`）。请求体上限 256 KiB，
-调用超时与客户端断开都会取消上游。
+安全（P5.4 起）：信任判定**优先交给框架**——`ctx.connection.requestRejection(request)` 给出
+`403`（Host/Origin 围栏不过：DNS rebinding、异源 Host）、`401`（围栏过了但缺浏览器会话）或放行；
+`connection` 不可用或抛错时回落到本插件原有的环回围栏（socket ∈ `127/8`/`::1`/`::ffff:127/8`
+**且** Host 是本机名 **且** 无跨站标记；永不信任 `X-Forwarded-For`）。
 
-> 已知偏差（P5.4 计划收敛）：这套围栏是插件自造的，**比框架自己的 `/api` 通道更弱也更严**——
-> 框架还会要求浏览器认证（`ctx.connection.requestRejection()` 给 401/403），并且支持
-> LAN/`trustedHosts` 部署；本插件目前只认环回，所以 LAN 部署下会全员 403。
+401 的处置按**路由是否会花掉凭据**分级：
+
+| 路由 | 是否要求浏览器会话 | 原因 |
+|---|---|---|
+| `POST /optimize` | **是** | 会消耗模型凭据；而凭据可能来自**环境变量**（`apiKeyEnv`），本机其它进程读不到它，却能借这条路由花掉它 |
+| `GET /catalog`、`GET /catalog/models`、`POST /check` | 否（仅环回） | 只暴露 provider/模型名与本插件配置，不花凭据；保留"命令行就能排查"的能力 |
+
+浏览器侧无需做任何事：会话 cookie 由 `dsh web` 打印的带 token 的 URL 换取，页面内同源 `fetch`
+会自动带上。顺带一提，因为整体走框架围栏，**LAN/`trustedHosts` 部署现在也能用**（带会话的浏览器即可）。
+
+请求体上限 256 KiB；调用超时与客户端断开都会取消上游。
 
 ## 开发循环
 
@@ -273,11 +307,11 @@ body: { provider: string, model: string }
 
 ## 下一步
 
-按 ROI 排序（P5.2 起）：
+按 ROI 排序：
 
-1. **P5.2 规则单一来源**：把 `presets`、各字段区间、`maxInputChars`、撤销栈深度都从 `/catalog` 下发，删掉客户端那份镜像校验与常量（当前两侧各写一份，是本轮"保存假成功"的根因之一）。
-2. **P5.3 预设菜单**：宿主侧 `presets` 已生效（请求带 `presetId` 即在 system 后追加该预设的 prompt），但客户端从不发 `presetId`，所以这功能目前只有 curl 能用——依赖 P5.2 的下发。
-3. **P5.4 并发与信任收敛**：按 `sessionId` 单航班 + 全局并发上限 + 令牌桶（防连打烧 token）；信任围栏改用 `ctx.connection.requestRejection()` / `connection.fetch`，顺带支持 LAN/`trustedHosts` 部署并获得浏览器认证；设置命名空间改用 `ctx.inject(['settings'], …)` 注册（避免激活顺序竞态）。
-4. **P5.5 流式回填**：把 `POST /optimize` 改成分块/SSE，边生成边显示（webserver 的 gzip filter 已对 `text/event-stream` 放行）。
-5. **P5.6 工程化**：`tsconfig.json` + `checkJs` typecheck（本轮多个缺陷都是"类型判错"，静态检查能提前抓住）、lint、CI、两个 smoke 套件迁 vitest（jsdom + 真 React——现在的假 React 测不出 hook 类问题）。
-6. **P5.7 芯片保留**：草稿含 `@引用` 时目前直接拒绝（整体 `setDraft` 会拉平芯片），后续可研究用 `insertReference` 重建。
+1. **P5.5 并发与配额**：按 `sessionId` 单航班 + 全局并发上限 + 令牌桶。前端已有 `running` 防连点，
+   但多标签页/本机脚本仍可并发刷调用——这是目前唯一还会"花掉真钱"的入口。
+2. **P5.6 流式回填**：把 `POST /optimize` 改成分块/SSE，边生成边显示（webserver 的 gzip filter 已对 `text/event-stream` 放行）。
+3. **P5.7 工程化**：`tsconfig.json` + `checkJs` typecheck（最近两轮多个缺陷都是"类型判错/契约判错"，静态检查能提前抓住）、lint、CI、两个 smoke 套件迁 vitest（jsdom + 真 React——现在的假 React 测不出 hook 类问题）。
+4. **P5.8 芯片保留**：草稿含 `@引用` 时目前直接拒绝（整体 `setDraft` 会拉平芯片），后续可研究用 `insertReference` 重建。
+5. **可选**：把 `presets` 也搬进设置页（现在只能改 `cordis.patch.yml`，改完要重启）。

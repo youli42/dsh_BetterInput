@@ -35,7 +35,7 @@
 | `lib/client.js` | 浏览器半：输入框按钮 + CAS + 撤销栈 + **设置页**（手写 bundle，无构建步骤） |
 | `lib/types/*.d.ts` | 对外契约类型（含组件行为契约、设置段字段） |
 | `scripts/link-dev-deps.mjs` | 把宿主的 `@deepseek-ai/*` 软链进本仓库（`pretest` 自动跑；`link:` 安装的运行时同样必需） |
-| `test/smoke.mjs`（33 例）、`test/client.smoke.mjs`（36 例） | 共 69 例，全绿（`npm test`） |
+| `test/smoke.mjs`（39 例）、`test/client.smoke.mjs`（42 例）、`test/settings-activation.mjs`（3 例） | 共 84 例，全绿（`npm test`） |
 
 **验收证据**：P0 曾在 Web GUI 目视确认（2026-09-10，当时用 `link:D:\SSDWP\AI\dsh\BetterInput` 装入 profile）。
 2026-09-11 复核时发现该路径已不存在、profile 里也没有本插件（bundles 无条目、patch 为空、`node_modules` 无包），
@@ -129,6 +129,8 @@ P1 的路由此后仍需在真机上 curl 一次（单测用假 LLM 流覆盖了
     假 `mutate` 在失败时抛错（真实现是静默返回）。替身对齐后各补了对应用例（含 405 文案、
     未知终态、组合层区间、样式归属、LRU 淘汰、保存未生效）。
 
+> P5.2–P5.4 的实施记录见本文档 §0.5 第 26–28 条（紧接 P5.1b 之后）。
+
 ### P5.1b（真机事故：设置页恒显示「设置服务不可用」，2026-09-11）
 
 **现象**：重启后设置页始终显示「设置服务不可用：宿主端没有挂载设置提供者（或插件宿主半未加载）」，
@@ -164,6 +166,30 @@ P1 的路由此后仍需在真机上 curl 一次（单测用假 LLM 流覆盖了
     这正是它能溜过当时 33 例冒烟测试的原因。宿主冒烟测试的假 ctx 同时补上真实的
     `ctx.inject(deps, cb)` 语义（服务未就绪则回调排队），并新增"晚到必须补注册""注册失败要带原因"
     "服务消失回降级"三个单元用例。
+
+### P5.2–P5.4（规则单一来源 / 预设菜单 / 信任判定收敛，2026-09-11）
+
+26. **规则单一来源（P5.2）**：`/catalog` 增发 `limits`（`maxInputChars` 与三个区间，来源就是
+    `lib/policy.js` 的 `TEMPERATURE_RANGE`/`MAX_OUTPUT_TOKENS_RANGE`/`TIMEOUT_RANGE`）与
+    `presets`（**只给 `id`/`label`**，`prompt` 留在宿主——客户端不需要也不该看到它）。
+    客户端删掉自带常量，只在 `/catalog` 未到时用 `LIMITS_FALLBACK` 兜底：设置页校验、数字框 `min`、
+    以及"草稿超长先本地提示"都跟着宿主走。**为什么值得做**：上一轮"保存假成功"的根因之一就是
+    客户端镜像只查下界、与宿主漂移；把镜像换成下发值，这类漂移从结构上消失。
+    （撤销栈深度仍是纯客户端策略——宿主没有这个配置项，所以它不属于"跨端共享规则"。）
+27. **预设菜单（P5.3）**：✨ 右侧的 `▾` 只在宿主配了 `presets` 时出现（没配的部署视觉零变化），
+    选中后请求带 `presetId`。菜单向上弹出、点外面或 Esc 收起（`document` 全局监听只在展开期间挂）。
+    预设清单复用同一个 `/catalog`（模块级缓存，一次页面加载最多一次往返）。
+    至此 P1 就实现好的宿主侧预设能力**终于对用户可达**（此前只有 curl 能触发）。
+28. **信任判定收敛（P5.4）**：改用 `ctx.connection.requestRejection(request)`——框架给出
+    `403`（Host/Origin 围栏：DNS rebinding、异源 Host）、`401`（围栏过了但缺浏览器会话）或放行。
+    401 的处置按"这条路由会不会花掉凭据"分级，而不是一刀切：
+    · 能力路由（`POST /optimize`）**要求浏览器会话**。理由是凭据可能来自**环境变量**
+      （`apiKeyEnv`）：本机其它进程读不到它，却能借这条路由花掉它——这才是真正需要挡的路径。
+    · 元数据路由（`/catalog`、`/catalog/models`、`/check`）在**环回**客户端上免会话，保留
+      "命令行就能排查"的能力（本次真机事故的定位全靠它）；非环回一律拒绝。
+    `connection` 不可用或它自己抛错时回落本插件原有的环回围栏——是"退回旧策略"而不是"放行"，
+    并且打一条 warn（安全策略静默降级比降级本身更危险）。
+    顺带收益：与框架 `/api` 走同一套判定，**LAN/`trustedHosts` 部署不再是全员 403**。
 
 ---
 
@@ -613,14 +639,17 @@ window.__ModuleLoader__.load({
 | 阶段 | 内容 | 验收 |
 |---|---|---|
 | **P0** 骨架 | 包结构 + 空座位注册 + 按钮出现在模型左侧 | ✅ 已在 GUI 目视确认（2026-09-10） |
-| **P1** 宿主路由 | `/api/dsh-input-optimizer/optimize` + 固定 system prompt + `ctx.llm.stream` | ✅ 已实现（宿主半 33 例绿；真实 curl 待确认） |
+| **P1** 宿主路由 | `/api/dsh-input-optimizer/optimize` + 固定 system prompt + `ctx.llm.stream` | ✅ 已实现（宿主半 39 例绿；真机 curl 已确认 200） |
 | **P2** 前后端接线 | 读 `input.draft` → POST → `setDraft` + CAS + 取消 + 失败提示 | ✅ 已实现（含 stale 丢弃、403/404/405/网络/空结果文案） |
 | **P3** 撤销 | 撤销栈 + CAS + 撤销按钮 + 文本相等判据 | ✅ 已实现（含二次点击强制还原、10 层深度、按会话隔离 + 20 会话 LRU） |
 | **P4** 提示词与模型配置页 | 设置面板分区（`settings.section`）：模型 + 调用参数 + 提示词，持久化 + 即时生效 + 校验 | ✅ 已实现（`applies: 'live'`；落 `settings.yaml`；设置页 12 条用例覆盖校验/持久化回填/不可用态） |
 | **P5.0** 可运行性 | dev 依赖软链脚本 + 安装/验收步骤可复现 | ✅ 已实现（2026-09-11；`npm test` 前自动链接宿主依赖） |
 | **P5.1** 缺陷修复 | 逐条核对装机版 API：日志、判型、终态语义、405 文案、保存假成功、组合层区间、样式归属 | ✅ 已实现（2026-09-11；共 7 项，见 §0.5 第 14–22 条） |
 | **P5.1b** 设置页不可用 | 命名空间注册时机竞态（`ctx.get('settings')` 一次性读 vs 服务 ACTIVE 时机） | ✅ 已修复（2026-09-11；真框架集成测试 3 例，见 §0.5 第 23–25 条） |
-| **P5.2–P5.7** 打磨 | 规则单一来源、预设菜单、并发与信任收敛、流式回填、工程化（typecheck/vitest/CI）、芯片保留 | ⬜ 待做（见 README「下一步」） |
+| **P5.2** 规则单一来源 | 区间/上限/预设由 `/catalog` 下发，客户端删掉会漂移的镜像 | ✅ 已实现（2026-09-11；见 §0.5 第 26 条） |
+| **P5.3** 预设菜单 | 输入框旁 `▾` 菜单，选中即带 `presetId` | ✅ 已实现（2026-09-11；见 §0.5 第 27 条） |
+| **P5.4** 信任判定收敛 | 改走 `ctx.connection.requestRejection()`；能力路由要求浏览器会话 | ✅ 已实现（2026-09-11；见 §0.5 第 28 条） |
+| **P5.5–P5.8** 打磨 | 并发配额、流式回填、工程化（typecheck/vitest/CI）、芯片保留 | ⬜ 待做（见 README「下一步」） |
 
 ---
 
@@ -648,6 +677,8 @@ window.__ModuleLoader__.load({
 | R-18 | 框架在**物化期**把未打标的 `<style>` 认领给当时物化的插件；`apply()` 晚于物化 | 样式表被别的插件认领走，其 HMR 重载时按 `style[data-plugin]` 删除 → 本插件丢样式，只有整页刷新才恢复 | 注入时自带 `data-plugin`/`data-plugin-css`（P5.1 第 20 条） |
 | R-19 | `link:` 安装是符号链接，Node 按 realpath 解析模块 → 插件自己的 `@deepseek-ai/*` 裸导入从**仓库目录**向上找 `node_modules`，`$DSH_HOME/profiles/node_modules` 镜像不在解析路径上 | 宿主半 `ERR_MODULE_NOT_FOUND`，boot 失败（不是"只有测试受影响"） | `scripts/link-dev-deps.mjs`（`pretest` 自动跑）在仓库内建 `dsh-llm` 与 `schemastery` 两个链接；正式（非 link）安装由 profile 镜像覆盖 |
 | R-20 | **激活顺序竞态**：`ctx.get(name)` 是 `strict = true`，对"已 provide 但未 ACTIVE"的服务返回 `undefined`；而 `SettingsProvider` 要 `await load()` 之后才 ACTIVE | 在 `apply()` 里一次性读设置服务 → 竞态落败就**永久**降级，设置页恒显示「设置服务不可用」（重启也一样，除非启动顺序恰好变好） | 一切"可选服务"都用 `ctx.inject([name], cb)` 挂载（服务就绪即执行、卸载即回收），不要用 `ctx.get` 做一次性判定；用真实框架跑集成测试钉住时机（`test/settings-activation.mjs`） |
+| R-21 | 能力路由若只靠 socket 环回判定，则**本机其它进程**可借它花掉用户的模型凭据（凭据来自 `apiKeyEnv` 时本机进程读不到它，却能用它） | 未授权消耗额度 | 能力路由（`/optimize`）要求浏览器会话（框架 `requestRejection` 的 401）；元数据路由保留环回免会话以便命令行排查。见 §0.5 第 28 条 |
+| R-22 | 仍**没有并发/速率限制**：前端 `running` 只挡连点，多标签页或本机脚本可并发刷 `optimize` | 短时间内重复烧 token | P5.5 待做：按 `sessionId` 单航班 + 全局并发上限 + 令牌桶 |
 
 ---
 
@@ -684,4 +715,4 @@ P0 期曾把「最小可跑骨架」抄在这里，但骨架会与真实代码�
 | 行为与接口契约（含撤销/取消语义、mutate 的失败语义） | [`lib/types/client/index.d.ts`](./lib/types/client/index.d.ts) |
 | 宿主契约与错误码清单 | [`lib/types/index.d.ts`](./lib/types/index.d.ts) |
 | 开发/`link:` 安装所需的依赖软链 | [`scripts/link-dev-deps.mjs`](./scripts/link-dev-deps.mjs)、[`scripts/dsh-packages.mjs`](./scripts/dsh-packages.mjs) |
-| 可执行的行为说明（36 + 37 + 3 = 76 例） | [`test/smoke.mjs`](./test/smoke.mjs)、[`test/client.smoke.mjs`](./test/client.smoke.mjs)、[`test/settings-activation.mjs`](./test/settings-activation.mjs) |
+| 可执行的行为说明（39 + 42 + 3 = 84 例） | [`test/smoke.mjs`](./test/smoke.mjs)、[`test/client.smoke.mjs`](./test/client.smoke.mjs)、[`test/settings-activation.mjs`](./test/settings-activation.mjs) |
