@@ -633,13 +633,15 @@ const ROUTE_STREAM = '/api/dsh-input-optimizer/optimize/stream'
 const ROUTE_CATALOG = '/api/dsh-input-optimizer/catalog'
 const ROUTE_CATALOG_MODELS = '/api/dsh-input-optimizer/catalog/models'
 const ROUTE_CHECK = '/api/dsh-input-optimizer/check'
+const ROUTE_OPEN_CONFIG = '/api/dsh-input-optimizer/open-config'
 const SETTINGS_NAMESPACE = 'better-input'
 
 /* ── 设置页 harness：假 scope + 假目录路由 ─────────────────────────────── */
 
 /**
  * 装一个按路径应答的 fetch 替身（设置页用）。
- * @param {{ catalog?: object, models?: object[], check?: object, failCatalog?: boolean }} options - 响应内容。
+ * @param {{ catalog?: object, models?: object[], check?: object, failCatalog?: boolean,
+ *   openConfig?: object }} options - 响应内容。
  * @returns {{ calls: object[] }} 观测点。
  */
 function installSettingsFetch(options = {}) {
@@ -652,6 +654,13 @@ function installSettingsFetch(options = {}) {
       body: init?.body === undefined ? undefined : JSON.parse(init.body),
     })
     if (url.startsWith(ROUTE_CATALOG_MODELS)) return respond({ models: options.models ?? [{ id: 'm1', name: 'M1' }] })
+    if (url === ROUTE_OPEN_CONFIG) {
+      // 默认成功并回传一个**测试用的假路径**：真实实现会去起系统默认程序，测试绝不能真起进程。
+      if (options.failOpenConfig === true) {
+        return respond(options.openConfig ?? { error: 'open-failed', message: '打开失败' }, 500)
+      }
+      return respond(options.openConfig ?? { ok: true, path: 'C:\\fake\\dsh-better-input\\cordis.patch.yml' })
+    }
     if (url === ROUTE_CATALOG) {
       if (options.failCatalog === true) return respond({}, 500)
       return respond(options.catalog ?? {
@@ -659,6 +668,7 @@ function installSettingsFetch(options = {}) {
         settings: { available: true, section: {} },
         providers: [{ id: 'acme', name: 'Acme' }, { id: 'deepseek-official', name: 'DeepSeek' }],
         styles: options.styles ?? [],
+        configPath: 'C:\\fake\\dsh-better-input\\cordis.patch.yml',
         effective: {
           provider: null,
           model: null,
@@ -1748,6 +1758,56 @@ await test('宿主没给风格清单（离线/旧宿主）时，表单仍可按�
   assert.deepEqual(page.scope.mutations[0].ops, [
     { op: 'set', path: ['stylePromptSpec'], value: '离线填的' },
   ])
+})
+
+console.log('client half: 打开插件配置文件（P6.3）')
+await test('打开配置文件按钮：调宿主路由，成功时显示宿主回传的绝对路径', async () => {
+  const page = mountSettings({ settingsValue: {} })
+  const button = page.view().action('open-config')
+  assert.equal(button.props.disabled, false, '按钮必须可点')
+  await button.props.onClick()
+  const call = page.network.calls.find(item => item.url === ROUTE_OPEN_CONFIG)
+  assert.ok(call !== undefined, '必须打到宿主的打开路由')
+  assert.equal(call.method, 'POST')
+  const note = page.view().noteText
+  assert.equal(String(note).startsWith('settings.openConfig.ok'), true)
+  // 路径由宿主解析并回传，前端只显示——绝不自己拼 profile 布局。
+  assert.equal(String(note).includes('C:\\fake\\dsh-better-input\\cordis.patch.yml'), true)
+  assert.equal(page.view().noteTone, 'ok')
+  assert.equal(page.view().action('open-config').props.disabled, false, '结束后要恢复可点')
+})
+await test('打开失败：把宿主的原因原样展示（找不到文件 / 平台不支持 / 起不来）', async () => {
+  const failed = mountSettings({
+    settingsValue: {},
+    failOpenConfig: true,
+    openConfig: { error: 'open-failed', message: '打开失败（spawn ENOENT）；请手动打开：C:\\x\\cordis.patch.yml' },
+  })
+  await failed.view().action('open-config').props.onClick()
+  const note = String(failed.view().noteText)
+  assert.equal(note.startsWith('settings.openConfig.fail'), true, '失败必须有明确提示')
+  assert.equal(note.includes('spawn ENOENT'), true, '宿主给的原因必须原样带给用户')
+  assert.equal(note.includes('请手动打开'), true, '必须给出可直接照做的兜底路径')
+  assert.equal(failed.view().noteTone, 'error')
+  assert.equal(failed.view().action('open-config').props.disabled, false, '失败后按钮要能再点')
+
+  // 网络层直接失败（宿主路由没挂上）也要有提示，不能静默什么都不发生。
+  const page = mountSettings({ settingsValue: {} })
+  globalThis.fetch = async () => { throw new TypeError('failed to fetch') }
+  await page.view().action('open-config').props.onClick()
+  assert.equal(String(page.view().noteText).startsWith('settings.openConfig.fail'), true)
+})
+await test('设置页展示配置文件路径（便于手动编辑/复制）', async () => {
+  const page = mountSettings({ settingsValue: {} })
+  page.view()
+  await tick()                        // 路径来自 /catalog 的 configPath
+  let pathText = null
+  const walk = (element) => {
+    if (element === null || typeof element !== 'object') return
+    if (element.props?.['data-dsh-bi-config-path'] !== undefined) pathText = childrenOf(element)[0]
+    for (const child of childrenOf(element)) walk(child)
+  }
+  walk(page.view().node)
+  assert.equal(String(pathText).includes('C:\\fake\\dsh-better-input\\cordis.patch.yml'), true)
 })
 
 await test('远端提交后（未在编辑）表单会同步成新值', async () => {

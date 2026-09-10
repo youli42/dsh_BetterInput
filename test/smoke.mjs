@@ -7,13 +7,16 @@
  */
 
 import assert from 'node:assert/strict'
+import { existsSync } from 'node:fs'
 
 import {
   MAX_BODY_BYTES,
+  PLUGIN_CONFIG_FILENAME,
   ROUTE,
   ROUTE_CATALOG,
   ROUTE_CATALOG_MODELS,
   ROUTE_CHECK,
+  ROUTE_OPEN_CONFIG,
   ROUTE_STREAM,
   SETTINGS_NAMESPACE,
   STYLE_IDS,
@@ -21,6 +24,7 @@ import {
   isIPv4Loopback,
   isLoopbackAddress,
   isLoopbackRequest,
+  openerCandidates,
   parseStyleIds,
   resolveConfig,
   systemPromptFor,
@@ -441,7 +445,7 @@ await test('插件契约：name/inject 与路由挂载点', () => {
   assert.deepEqual(inject, ['webServer', 'llm'])
   assert.deepEqual(
     routes.map(route => route.path).sort(),
-    [ROUTE_CATALOG, ROUTE_CATALOG_MODELS, ROUTE, ROUTE_STREAM, ROUTE_CHECK].sort(),
+    [ROUTE_CATALOG, ROUTE_CATALOG_MODELS, ROUTE, ROUTE_STREAM, ROUTE_CHECK, ROUTE_OPEN_CONFIG].sort(),
   )
   for (const route of routes) {
     assert.equal(route.kind, 'exact')
@@ -462,7 +466,7 @@ await test('日志必须真的落进 ctx.logger（ctx.get("logger") 恒为 undef
   assert.ok(mounted !== undefined, 'apply 必须打印 mounted 日志')
   assert.equal(mounted.level, 'info')
   // printf 风格：ROUTE 是参数而不是拼进格式串（否则消息里的 % 占位符会被吃掉）。
-  assert.equal(mounted.format, 'better-input: mounted %s (+stream/catalog/check)')
+  assert.equal(mounted.format, 'better-input: mounted %s (+stream/catalog/check/open-config)')
   assert.equal(mounted.params[0], ROUTE)
   // 设置命名空间的注册结论也必须有一条明确日志（否则"设置服务不可用"根本无从排查）。
   const registered = observations.logs.find(entry => String(entry.format).includes('settings namespace'))
@@ -741,9 +745,13 @@ await test('信任判定优先交给框架的 connection.requestRejection（403/
   assert.equal((await drivePath(ROUTE_CHECK, fakeRequest({ method: 'POST', body: '{"provider":"p","model":"m"}' }))).status, 200)
 
   // 5) 但**非环回**客户端即便只是读元数据也要被拒（LAN 客户端必须带会话）。
+  // 6) 打开配置文件是**能力路由**（会在宿主上起进程），所以即便环回、缺会话也要被挡住。
+  const openConfig = await drivePath(ROUTE_OPEN_CONFIG, fakeRequest({ method: 'POST' }))
+  assert.equal(openConfig.status, 401, '起进程的按钮不能靠"环回"免会话')
+
   const lan = await drivePath(ROUTE_CATALOG, fakeRequest({ method: 'GET', remoteAddress: '10.1.2.3' }))
   assert.equal(lan.status, 403)
-  assert.equal(metadata.routes.length, 5)
+  assert.equal(metadata.routes.length, 6)
 })
 await test('connection 判定抛错时回落旧围栏（不是放行）', async () => {
   const observations = setup({}, {
@@ -914,7 +922,7 @@ await test('注册 better-input 命名空间，applies=live，validate 拒绝非
 await test('部署没挂设置提供者时：不报错、不注册、路由照挂', async () => {
   const observations = setup({}, { settings: false, chunks: TEXT_CHUNKS, selection: { provider: 'p', model: 'm' } })
   assert.equal(observations.settingsCalls.length, 0)
-  assert.equal(observations.routes.length, 5)
+  assert.equal(observations.routes.length, 6)
   const result = await drive(fakeRequest({ body: '{"text":"x"}' }))
   assert.equal(result.status, 200)
   assert.equal(result.json.text, '改写后的提示词。')
@@ -1228,6 +1236,48 @@ await test('catalog 下发风格清单与来源，但绝不下发提示词正文
   // 但**用户自己填的值**必须回给设置页（否则表单显示不出当前值）——这一条与上面不冲突：
   // 那是用户自己的输入，不是宿主侧的默认/组合层文案。
   assert.equal(catalog.json.settings.section.stylePromptSpec, '我自己的规格要求')
+  // 客户端要靠它显示"配置文件在哪"，路径必须是包根下那个真实文件。
+  assert.equal(catalog.json.configPath.endsWith(PLUGIN_CONFIG_FILENAME), true, catalog.json.configPath)
+  assert.equal(existsSync(catalog.json.configPath), true, `配置文件必须真实存在：${catalog.json.configPath}`)
+})
+
+console.log('host half: 打开插件配置文件（P6.3）')
+await test('打开配置文件的编辑器候选链（win32 优先 VS Code、兜底 notepad，其余平台明确不支持）', () => {
+  const target = 'C:\\x\\cordis.patch.yml'
+  const roots = { localAppData: 'C:\\Users\\u\\AppData\\Local', programFiles: 'C:\\PF' }
+  const win = openerCandidates('win32', target, roots)
+  // 顺序即优先级：先 VS Code（存在才试），最后一定有一条系统自带的。
+  assert.deepEqual(win[0], { file: 'C:\\Users\\u\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe', args: [target] })
+  assert.deepEqual(win[1], { file: 'C:\\PF\\Microsoft VS Code\\Code.exe', args: [target] })
+  assert.deepEqual(win[win.length - 1], { file: 'notepad.exe', args: [target] })
+  assert.equal(win.every(candidate => candidate.args[0] === target), true)
+  // 没有任何根目录信息时仍要留下"必然可用"的那条，不能变成空链。
+  assert.deepEqual(openerCandidates('win32', target, {}), [{ file: 'notepad.exe', args: [target] }])
+  // macOS/Linux 走各自的门面命令；macOS 加 -t 强制用默认**文本编辑器**（这个按钮是为编辑）。
+  assert.deepEqual(openerCandidates('darwin', target), [{ file: 'open', args: ['-t', target] }])
+  assert.deepEqual(openerCandidates('linux', target), [{ file: 'xdg-open', args: [target] }])
+  // 未知平台返回空数组 → 路由回 501 并提示"请手动打开 <绝对路径>"，而不是静默什么都不做。
+  assert.deepEqual(openerCandidates('freebsd', target), [])
+  assert.equal(PLUGIN_CONFIG_FILENAME, 'cordis.patch.yml')
+})
+await test('打开配置文件是能力路由：GET 405、非环回 403、缺会话 401（且都不起进程）', async () => {
+  setup({}, { chunks: TEXT_CHUNKS, selection: { provider: 'p', model: 'm' } })
+  const wrongMethod = await drivePath(ROUTE_OPEN_CONFIG, fakeRequest({ method: 'GET' }))
+  assert.equal(wrongMethod.status, 405)
+  const remote = await drivePath(ROUTE_OPEN_CONFIG, fakeRequest({ method: 'POST', remoteAddress: '10.0.0.5' }))
+  assert.equal(remote.status, 403)
+  // 框架要求浏览器会话时，即便环回也必须挡住（这条路由会在宿主上起进程）。
+  setup({}, { chunks: TEXT_CHUNKS, selection: { provider: 'p', model: 'm' }, connection: { requestRejection: () => 401 } })
+  const noSession = await drivePath(ROUTE_OPEN_CONFIG, fakeRequest({ method: 'POST' }))
+  assert.equal(noSession.status, 401)
+  assert.equal(noSession.json.error, 'unauthorized')
+})
+await test('启用状态与路由表一致性：settings 不可用时路由照挂（含 open-config）', async () => {
+  const observations = setup({}, { settings: false, chunks: TEXT_CHUNKS, selection: { provider: 'p', model: 'm' } })
+  assert.deepEqual(
+    observations.routes.map(route => route.path).sort(),
+    [ROUTE, ROUTE_STREAM, ROUTE_CATALOG, ROUTE_CATALOG_MODELS, ROUTE_CHECK, ROUTE_OPEN_CONFIG].sort(),
+  )
 })
 
 console.log('')
