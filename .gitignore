@@ -1,0 +1,6 @@
+# 依赖目录：仅用于本地开发时把 @deepseek-ai/* 软链进来跑测试
+node_modules/
+
+# dsh 运行时/日志
+*.log
+.dsh-*

@@ -1,0 +1,7 @@
+# 统一用 LF 存库、检出一致，避免 Windows 上出现整文件 CRLF 变更
+* text=auto eol=lf
+
+# 二进制/生成物不参与文本处理
+*.png binary
+*.jpg binary
+*.woff2 binary
