@@ -35,7 +35,7 @@
 | `lib/client.js` | 浏览器半：输入框按钮 + CAS + 撤销栈 + **设置页**（手写 bundle，无构建步骤） |
 | `lib/types/*.d.ts` | 对外契约类型（含组件行为契约、设置段字段） |
 | `scripts/link-dev-deps.mjs` | 把宿主的 `@deepseek-ai/*` 软链进本仓库（`pretest` 自动跑；`link:` 安装的运行时同样必需） |
-| `test/smoke.mjs`（39 例）、`test/client.smoke.mjs`（42 例）、`test/settings-activation.mjs`（3 例） | 共 84 例，全绿（`npm test`） |
+| `test/smoke.mjs`（42 例）、`test/client.smoke.mjs`（42 例）、`test/settings-activation.mjs`（3 例） | 共 87 例，全绿（`npm test`） |
 
 **验收证据**：P0 曾在 Web GUI 目视确认（2026-09-10，当时用 `link:D:\SSDWP\AI\dsh\BetterInput` 装入 profile）。
 2026-09-11 复核时发现该路径已不存在、profile 里也没有本插件（bundles 无条目、patch 为空、`node_modules` 无包），
@@ -190,6 +190,14 @@ P1 的路由此后仍需在真机上 curl 一次（单测用假 LLM 流覆盖了
     `connection` 不可用或它自己抛错时回落本插件原有的环回围栏——是"退回旧策略"而不是"放行"，
     并且打一条 warn（安全策略静默降级比降级本身更危险）。
     顺带收益：与框架 `/api` 走同一套判定，**LAN/`trustedHosts` 部署不再是全员 403**。
+29. **并发闸门（P5.5）**：`createGate(maxConcurrentCalls)` 提供**同会话单航班**（第二条 409
+    `busy-session`）与**全局并发上限**（默认 4，超限 429 `too-many-requests`）。
+    选择"快速失败"而不是排队：行为可预测，且不会把请求堆在后面慢慢烧钱。
+    闸门在 `apply()` 里创建 → 随 fiber 生命周期归零；占位在所有校验之后、真正调用模型之前
+    （被拒的请求不占位、也不花钱），并在 `finally` 里释放（成功/失败/超时/取消都归还名额，
+    有专门用例守着——否则几次取消之后插件就"锁死"了）。
+    剩余：没有做速率限制（令牌桶）。当前策略挡住的是"并发刷"这一最直接的花钱方式，
+    单个脚本仍可串行高频调用；真要挡需要按用户/时间窗计量，属于产品策略而非技术缺口。
 
 ---
 
@@ -639,7 +647,7 @@ window.__ModuleLoader__.load({
 | 阶段 | 内容 | 验收 |
 |---|---|---|
 | **P0** 骨架 | 包结构 + 空座位注册 + 按钮出现在模型左侧 | ✅ 已在 GUI 目视确认（2026-09-10） |
-| **P1** 宿主路由 | `/api/dsh-input-optimizer/optimize` + 固定 system prompt + `ctx.llm.stream` | ✅ 已实现（宿主半 39 例绿；真机 curl 已确认 200） |
+| **P1** 宿主路由 | `/api/dsh-input-optimizer/optimize` + 固定 system prompt + `ctx.llm.stream` | ✅ 已实现（宿主半 42 例绿；真机 curl 已确认 200） |
 | **P2** 前后端接线 | 读 `input.draft` → POST → `setDraft` + CAS + 取消 + 失败提示 | ✅ 已实现（含 stale 丢弃、403/404/405/网络/空结果文案） |
 | **P3** 撤销 | 撤销栈 + CAS + 撤销按钮 + 文本相等判据 | ✅ 已实现（含二次点击强制还原、10 层深度、按会话隔离 + 20 会话 LRU） |
 | **P4** 提示词与模型配置页 | 设置面板分区（`settings.section`）：模型 + 调用参数 + 提示词，持久化 + 即时生效 + 校验 | ✅ 已实现（`applies: 'live'`；落 `settings.yaml`；设置页 12 条用例覆盖校验/持久化回填/不可用态） |
@@ -649,7 +657,8 @@ window.__ModuleLoader__.load({
 | **P5.2** 规则单一来源 | 区间/上限/预设由 `/catalog` 下发，客户端删掉会漂移的镜像 | ✅ 已实现（2026-09-11；见 §0.5 第 26 条） |
 | **P5.3** 预设菜单 | 输入框旁 `▾` 菜单，选中即带 `presetId` | ✅ 已实现（2026-09-11；见 §0.5 第 27 条） |
 | **P5.4** 信任判定收敛 | 改走 `ctx.connection.requestRejection()`；能力路由要求浏览器会话 | ✅ 已实现（2026-09-11；见 §0.5 第 28 条） |
-| **P5.5–P5.8** 打磨 | 并发配额、流式回填、工程化（typecheck/vitest/CI）、芯片保留 | ⬜ 待做（见 README「下一步」） |
+| **P5.5** 并发闸门 | 同会话单航班（409）+ 全局并发上限（429，默认 4，可配 `maxConcurrentCalls`） | ✅ 已实现（2026-09-11；见 §0.5 第 29 条） |
+| **P5.6–P5.8** 打磨 | 流式回填、工程化（typecheck/vitest/CI）、芯片保留 | ⬜ 待做（见 README「下一步」） |
 
 ---
 
@@ -678,7 +687,7 @@ window.__ModuleLoader__.load({
 | R-19 | `link:` 安装是符号链接，Node 按 realpath 解析模块 → 插件自己的 `@deepseek-ai/*` 裸导入从**仓库目录**向上找 `node_modules`，`$DSH_HOME/profiles/node_modules` 镜像不在解析路径上 | 宿主半 `ERR_MODULE_NOT_FOUND`，boot 失败（不是"只有测试受影响"） | `scripts/link-dev-deps.mjs`（`pretest` 自动跑）在仓库内建 `dsh-llm` 与 `schemastery` 两个链接；正式（非 link）安装由 profile 镜像覆盖 |
 | R-20 | **激活顺序竞态**：`ctx.get(name)` 是 `strict = true`，对"已 provide 但未 ACTIVE"的服务返回 `undefined`；而 `SettingsProvider` 要 `await load()` 之后才 ACTIVE | 在 `apply()` 里一次性读设置服务 → 竞态落败就**永久**降级，设置页恒显示「设置服务不可用」（重启也一样，除非启动顺序恰好变好） | 一切"可选服务"都用 `ctx.inject([name], cb)` 挂载（服务就绪即执行、卸载即回收），不要用 `ctx.get` 做一次性判定；用真实框架跑集成测试钉住时机（`test/settings-activation.mjs`） |
 | R-21 | 能力路由若只靠 socket 环回判定，则**本机其它进程**可借它花掉用户的模型凭据（凭据来自 `apiKeyEnv` 时本机进程读不到它，却能用它） | 未授权消耗额度 | 能力路由（`/optimize`）要求浏览器会话（框架 `requestRejection` 的 401）；元数据路由保留环回免会话以便命令行排查。见 §0.5 第 28 条 |
-| R-22 | 仍**没有并发/速率限制**：前端 `running` 只挡连点，多标签页或本机脚本可并发刷 `optimize` | 短时间内重复烧 token | P5.5 待做：按 `sessionId` 单航班 + 全局并发上限 + 令牌桶 |
+| R-22 | 并发/速率限制：多标签页或本机脚本可并发刷 `optimize` | 短时间内重复烧 token | ✅ P5.5 已收敛并发部分：同会话单航班 + 全局上限（默认 4）；**速率限制（令牌桶）仍未做**，属产品策略 |
 
 ---
 
@@ -715,4 +724,4 @@ P0 期曾把「最小可跑骨架」抄在这里，但骨架会与真实代码�
 | 行为与接口契约（含撤销/取消语义、mutate 的失败语义） | [`lib/types/client/index.d.ts`](./lib/types/client/index.d.ts) |
 | 宿主契约与错误码清单 | [`lib/types/index.d.ts`](./lib/types/index.d.ts) |
 | 开发/`link:` 安装所需的依赖软链 | [`scripts/link-dev-deps.mjs`](./scripts/link-dev-deps.mjs)、[`scripts/dsh-packages.mjs`](./scripts/dsh-packages.mjs) |
-| 可执行的行为说明（39 + 42 + 3 = 84 例） | [`test/smoke.mjs`](./test/smoke.mjs)、[`test/client.smoke.mjs`](./test/client.smoke.mjs)、[`test/settings-activation.mjs`](./test/settings-activation.mjs) |
+| 可执行的行为说明（42 + 42 + 3 = 87 例） | [`test/smoke.mjs`](./test/smoke.mjs)、[`test/client.smoke.mjs`](./test/client.smoke.mjs)、[`test/settings-activation.mjs`](./test/settings-activation.mjs) |

@@ -19,9 +19,10 @@ DSH Web GUI 插件：在**模型选择器左侧**加一个「AI 优化输入」�
 | P5.2 | 规则单一来源：区间/上限/预设由 `/catalog` 下发，客户端不再维护会漂移的镜像 | ✅ 已实现（2026-09-11） |
 | P5.3 | 预设菜单：输入框旁 ▾ 菜单，选中后请求带 `presetId` | ✅ 已实现（2026-09-11） |
 | P5.4 | 信任判定改走框架 `ctx.connection.requestRejection()`（能力路由要浏览器会话） | ✅ 已实现（2026-09-11） |
-| P5.5–P5.7 | 并发配额、流式回填、工程化、芯片保留 | ⬜ 待做（见「下一步」） |
+| P5.5 | 并发闸门：同会话单航班（409）+ 全局并发上限（429） | ✅ 已实现（2026-09-11） |
+| P5.6–P5.8 | 流式回填、工程化、芯片保留 | ⬜ 待做（见「下一步」） |
 
-测试：宿主半 39 例 + 浏览器半 42 例 + 真框架集成 3 例，全绿
+测试：宿主半 42 例 + 浏览器半 42 例 + 真框架集成 3 例，全绿
 （`npm test`，会先自动补齐 dev 依赖链接）。
 
 > **运行前提**：仓库里没有 `node_modules` 时，`npm test` 与 `link:` 方式安装后的运行时都跑不起来
@@ -39,7 +40,7 @@ lib/client.js         浏览器半：输入框按钮 + 预设菜单 + 撤销栈 
 lib/types/*.d.ts      对外类型
 scripts/dsh-packages.mjs  定位 dsh 安装与其中的宿主包（脚本与集成测试共用）
 scripts/link-dev-deps.mjs 把宿主的 @deepseek-ai/* 软链进本仓库（`npm test` 前自动跑）
-test/smoke.mjs        宿主半冒烟测试（39 例）
+test/smoke.mjs        宿主半冒烟测试（42 例）
 test/client.smoke.mjs 浏览器半冒烟测试（42 例：接线、预设菜单、宿主下发规则、撤销栈、设置页）
 test/settings-activation.mjs 真框架集成测试（3 例：用真实 cordis + 真实 settings 提供者钉住注册时机）
 DESIGN.md             设计依据：座位/接口证据、撤销方案、提示词分层、风险清单
@@ -145,7 +146,7 @@ curl.exe -s -X POST http://127.0.0.1:3080/api/dsh-input-optimizer/check `
 
 ```powershell
 npm test                          # 先自动补 dev 依赖链接，再跑三个套件
-node test\smoke.mjs               # 宿主半 39 例：生效配置、信任判定、四路由全链路、注册时机
+node test\smoke.mjs               # 宿主半 42 例：生效配置、信任判定、并发闸门、四路由全链路、注册时机
 node test\client.smoke.mjs        # 浏览器半 42 例：座位、预设菜单、宿主下发规则、撤销栈、设置页
 node test\settings-activation.mjs # 真框架集成 3 例：真实 cordis + 真实 settings 提供者，钉住注册时机
 ```
@@ -163,6 +164,8 @@ node test\settings-activation.mjs # 真框架集成 3 例：真实 cordis + 真�
 | 点击 ✨ | `POST /api/dsh-input-optimizer/optimize`（body `{ text, sessionId }`），成功后 `setDraft` 写回 |
 | 预设菜单（`▾`） | 只在宿主配了 `presets` 时出现；选中后请求带 `presetId`，宿主把该预设的 prompt 追加到 system。菜单向上弹出，点外面或 Esc 收起 |
 | 草稿超过宿主上限 | 本地直接提示「草稿过长（n/上限）」，不发请求（上限来自 `/catalog` 的 `limits`） |
+| 同会话重复请求 | 宿主返回 `409 busy-session`（多标签页同时点同一会话时可见），提示「这个会话已经在优化中了」 |
+| 全局并发打满 | 宿主返回 `429 too-many-requests`（默认上限 4，可用 `maxConcurrentCalls` 调），提示带上限值 |
 | 生成中再点 | **取消**（abort；宿主侧同时取消上游模型调用，不产生费用累积） |
 | 生成中用户继续打字 | 返回时 CAS（`draftRev` + 文本双比对）失败 → **丢弃结果**，提示「草稿已变化」 |
 | 成功后 | 出现 ↶ 撤销按钮；提示 3 秒后自动消失 |
@@ -234,6 +237,7 @@ node test\settings-activation.mjs # 真框架集成 3 例：真实 cordis + 真�
 | `maxOutputTokens` | `1024` | 输出 token 上限，**取值域 1–200000**（截断仍返回文本并标 `truncated: true`） |
 | `timeoutMs` | `30000` | 单次调用超时，**取值域 1000–600000 ms**（超时 504） |
 | `temperature` | 不传 | 采样温度，取值域 0–2（缺省交给适配器决定） |
+| `maxConcurrentCalls` | `4` | 全局并发调用上限，取值域 1–64。**同会话单航班**始终生效（第二条得 409），超上限得 429 |
 
 未知字段名、类型错误或**超出取值域**都会让**启动失败并报出字段名**（fail loud，避免「拼错字段却以为生效了」，
 也避免 `AbortSignal.timeout` 超范围时每次请求都 502）。
@@ -252,7 +256,9 @@ body: { text: string, sessionId?: string, presetId?: string }
 401 { error: 'unauthorized', message }        // 缺浏览器会话（见下「安全」）
 403 { error: 'forbidden' }
 405 { error: 'method-not-allowed' }
+409 { error: 'busy-session', message }        // 同一会话已有优化在跑（单航班）
 413 { error: 'body-too-large' }
+429 { error: 'too-many-requests', message }   // 全局并发达上限（maxConcurrentCalls）
 499 { error: 'client-gone', message }        // 客户端已断开（非标准码，nginx 习惯用法）
 502 { error: 'no-model-route' | 'model-failed', message }
 504 { error: 'timeout' }
@@ -309,9 +315,7 @@ body: { provider: string, model: string }
 
 按 ROI 排序：
 
-1. **P5.5 并发与配额**：按 `sessionId` 单航班 + 全局并发上限 + 令牌桶。前端已有 `running` 防连点，
-   但多标签页/本机脚本仍可并发刷调用——这是目前唯一还会"花掉真钱"的入口。
-2. **P5.6 流式回填**：把 `POST /optimize` 改成分块/SSE，边生成边显示（webserver 的 gzip filter 已对 `text/event-stream` 放行）。
-3. **P5.7 工程化**：`tsconfig.json` + `checkJs` typecheck（最近两轮多个缺陷都是"类型判错/契约判错"，静态检查能提前抓住）、lint、CI、两个 smoke 套件迁 vitest（jsdom + 真 React——现在的假 React 测不出 hook 类问题）。
-4. **P5.8 芯片保留**：草稿含 `@引用` 时目前直接拒绝（整体 `setDraft` 会拉平芯片），后续可研究用 `insertReference` 重建。
-5. **可选**：把 `presets` 也搬进设置页（现在只能改 `cordis.patch.yml`，改完要重启）。
+1. **P5.6 流式回填**：把 `POST /optimize` 改成分块/SSE，边生成边显示（webserver 的 gzip filter 已对 `text/event-stream` 放行）。
+2. **P5.7 工程化**：`tsconfig.json` + `checkJs` typecheck（最近两轮多个缺陷都是"类型判错/契约判错"，静态检查能提前抓住）、lint、CI、两个 smoke 套件迁 vitest（jsdom + 真 React——现在的假 React 测不出 hook 类问题）。
+3. **P5.8 芯片保留**：草稿含 `@引用` 时目前直接拒绝（整体 `setDraft` 会拉平芯片），后续可研究用 `insertReference` 重建。
+4. **可选**：把 `presets` 也搬进设置页（现在只能改 `cordis.patch.yml`，改完要重启）；给 `ctx.logger` 加文件落盘（`dsh web` 目前只写 stdout，事故复盘只能用 API 反推）。
