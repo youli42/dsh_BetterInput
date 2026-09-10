@@ -1,0 +1,6 @@
+# 归因用：保留插件行、但让它 apply() 立刻返回（不挂路由、不注册设置命名空间）。
+# 与 disable-better-input.yml 的差 = 模块导入(含依赖)成本；
+# 与插件启用态的差 = 挂载 5 条路由 + 绑定设置命名空间 + 建闸门的成本。
+- id: better-input
+  config:
+    enabled: false

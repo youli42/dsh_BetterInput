@@ -1,0 +1,4 @@
+# 性能对照用的临时覆盖层：把本插件那一行从 profile 树里关掉。
+# 用法：dsh web --port 0 --no-open --patch F:\dsh\dsh_BetterInput\.perf\disable-better-input.yml
+- id: better-input
+  disabled: true
