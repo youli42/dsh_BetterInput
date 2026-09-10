@@ -16,6 +16,15 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
+import {
+  SETTINGS_FIELD_KEYS,
+  STYLE_IDS as HOST_STYLE_IDS,
+  STYLE_PROMPT_FIELDS,
+} from '../lib/policy.js'
+
+/** 宿主的逐风格提示词字段清单（用来钉住客户端那份镜像没有漂移）。 */
+const HOST_STYLE_FIELDS = Object.values(STYLE_PROMPT_FIELDS)
+
 let passed = 0
 const failures = []
 
@@ -93,6 +102,28 @@ function childrenOf(node) {
 const appendedStyles = []
 let entry
 
+/**
+ * document 上的监听器登记表。
+ *
+ * 必须是**真的**登记表（而不是空函数）：菜单"点外面关闭"和"点菜单内部不关"是两个真实分支，
+ * 用空实现当替身会让"勾选风格时菜单被关掉"这种缺陷永远测不出来。
+ */
+const documentListeners = new Map()
+
+/**
+ * 触发一次 document 级的 mousedown（模拟真实 DOM 的冒泡结果）。
+ * @param {object | null} target - 事件目标；`null` 表示点在菜单外面。
+ * @returns {number} 被调用到的监听器数。
+ */
+function dispatchMouseDown(target) {
+  let called = 0
+  for (const listener of documentListeners.get('mousedown') ?? []) {
+    listener({ type: 'mousedown', target })
+    called += 1
+  }
+  return called
+}
+
 globalThis.window = {
   setTimeout: () => 0,
   clearTimeout: () => {},
@@ -105,8 +136,16 @@ globalThis.document = {
   createElement: () => ({ id: '', textContent: '', dataset: {} }),
   getElementById: (id) => appendedStyles.find(style => style.id === id) ?? null,
   // 预设菜单打开时会挂"点外面/Esc 关闭"的全局监听（真 DOM 一定有这两个方法）。
-  addEventListener: () => {},
-  removeEventListener: () => {},
+  addEventListener: (type, listener) => {
+    const bucket = documentListeners.get(type) ?? []
+    bucket.push(listener)
+    documentListeners.set(type, bucket)
+  },
+  removeEventListener: (type, listener) => {
+    const bucket = documentListeners.get(type) ?? []
+    const at = bucket.indexOf(listener)
+    if (at >= 0) bucket.splice(at, 1)
+  },
 }
 
 await import('../lib/client.js')
@@ -226,14 +265,14 @@ function fakeCtx(options = {}) {
  * 装一个可手动结算的 fetch 替身。
  *
  * 覆盖三条路径：
- *   · `GET /catalog` → 立即结算（预设/区间）；
+ *   · `GET /catalog` → 立即结算（预设/风格/区间）；
  *   · `POST /optimize/stream` → 默认**回 404**，于是所有既有用例都在测"回退到一次性 JSON"这条路；
  *     传 `{ streaming: true }` 时改为返回一个**可控 SSE 流**（`facade.stream`），用来测流式回填；
  *   · `POST /optimize` → 可悬挂、可手动结算、可取消（原行为）。
  *
  * `respond({data})` 会结算"当前待结算的请求"；若此刻还没有请求（例如流式刚拿到 404、回退请求还没发出），
  * 就先**记下来**等下一个 POST 请求到达时自动结算——否则用例得依赖微任务时序，很脆。
- * @param {{ presets?: object[], limits?: object, catalog?: object, failCatalog?: boolean, streaming?: boolean }} [options] - 替身参数。
+ * @param {{ presets?: object[], styles?: object[], limits?: object, catalog?: object, failCatalog?: boolean, streaming?: boolean }} [options] - 替身参数。
  * @returns {object} 门面：calls / optimizeCalls / catalogCalls / pendingCount / respond / fail / stream。
  */
 function installFetch(options = {}) {
@@ -296,6 +335,7 @@ function installFetch(options = {}) {
           timeoutMs: { min: 1000, max: 600000 },
         },
         presets: options.presets ?? [],
+        styles: options.styles ?? [],
         effective: { provider: null, model: null, temperature: null, maxOutputTokens: 1024, timeoutMs: 30000 },
       }
       const status = options.failCatalog === true ? 500 : 200
@@ -560,6 +600,10 @@ function mount(options = {}) {
       presetToggle,
       /** 菜单项（按渲染顺序）。 */
       presetItems,
+      /** 风格复选框（多选控件，按渲染顺序）。 */
+      styleBoxes: byProp(node, 'data-dsh-better-input-style'),
+      /** 菜单里的「按所选风格优化」按钮。 */
+      apply: byProp(node, 'data-dsh-better-input-apply')[0] ?? null,
       /** 菜单是否展开（由 DOM 推导，而不是读组件内部 state）。 */
       menuOpen: menu !== null,
       /** 提示正文（无提示时为 null）。 */
@@ -614,6 +658,7 @@ function installSettingsFetch(options = {}) {
         namespace: SETTINGS_NAMESPACE,
         settings: { available: true, section: {} },
         providers: [{ id: 'acme', name: 'Acme' }, { id: 'deepseek-official', name: 'DeepSeek' }],
+        styles: options.styles ?? [],
         effective: {
           provider: null,
           model: null,
@@ -942,7 +987,42 @@ await test('草稿含芯片时拒绝发请求（整体替换会丢引用）', as
 })
 
 console.log('client half: 预设菜单与宿主下发的规则（P5.2/P5.3）')
-await test('宿主配了预设：菜单按钮出现，选中后请求带 presetId', async () => {
+await test('菜单的关闭手势：点外面/Esc 收起，点菜单**内部**不收起（多选才能连着勾）', async () => {
+  // 这条用例的存在理由：`onDown` 若只是 `setMenuOpen(false)`，勾第一个风格就会把菜单关掉，
+  // "多选"直接不可用——而手写替身如果 `addEventListener` 是空函数，这个缺陷永远测不出来。
+  installFetch({
+    styles: [
+      { id: 'concise', label: '精简', source: 'default' },
+      { id: 'spec', label: '转规格', source: 'default' },
+    ],
+  })
+  const harness = mount({ draft: '草稿' })
+  harness.view()
+  await tick()
+  await harness.view().presetToggle.props.onClick()
+  assert.equal(harness.view().menuOpen, true)
+
+  // 点在菜单内部（勾选框的 target.closest 能命中菜单）→ 必须保持展开。
+  const insideTarget = { closest: (selector) => (selector === '[data-dsh-better-input-menu]' ? {} : null) }
+  assert.equal(dispatchMouseDown(insideTarget), 1, '菜单展开时应当挂着 document 的关闭监听')
+  assert.equal(harness.view().menuOpen, true, '点在菜单内部不得收起菜单')
+
+  // 点在菜单外面（closest 返回 null）→ 收起。
+  const outsideTarget = { closest: () => null }
+  dispatchMouseDown(outsideTarget)
+  assert.equal(harness.view().menuOpen, false, '点外面必须收起')
+
+  // Esc 同样收起。
+  await harness.view().presetToggle.props.onClick()
+  assert.equal(harness.view().menuOpen, true)
+  for (const listener of documentListeners.get('keydown') ?? []) listener({ key: 'Escape' })
+  assert.equal(harness.view().menuOpen, false, 'Esc 必须收起')
+
+  // 菜单收起后监听器必须被摘掉（否则每次开合都会叠一层）。
+  assert.equal(documentListeners.get('mousedown').length, 0)
+  assert.equal(documentListeners.get('keydown').length, 0)
+})
+await test('预设菜单（单选）：宿主配了预设且没配风格时，行为与从前一致', async () => {
   const network = installFetch({ presets: [{ id: 'concise', label: '精简' }, { id: 'spec', label: '转规格' }] })
   const harness = mount({ draft: '帮我写个爬虫' })
   harness.view()
@@ -981,11 +1061,11 @@ await test('点主按钮不带 presetId（默认提示词路径不变）', async
   await pending
 })
 await test('没配预设 / 目录读失败：不渲染菜单按钮，主按钮照常可用', async () => {
-  installFetch({ presets: [] })   // 全局 fetch 替身：目录返回"没有预设"
+  installFetch({ presets: [], styles: [] })   // 全局 fetch 替身：目录返回"没有预设、也没有风格"
   const harness = mount({ draft: '草稿' })
   harness.view()
   await tick()
-  assert.equal(harness.view().presetToggle, null, '没配预设时视觉必须与从前一致')
+  assert.equal(harness.view().presetToggle, null, '风格与预设都为空时视觉必须与从前一致')
 
   const broken = installFetch({ failCatalog: true })
   const other = mount({ draft: '草稿' })
@@ -997,6 +1077,143 @@ await test('没配预设 / 目录读失败：不渲染菜单按钮，主按钮�
   broken.respond({ data: { text: '改写后' } })
   await pending
   assert.equal(other.truth.draft, '改写后')
+})
+await test('多选优化风格：勾选可叠加、可取消，请求带 styleIds', async () => {
+  const network = installFetch({
+    styles: [
+      { id: 'concise', label: '精简', source: 'default' },
+      { id: 'spec', label: '转规格', source: 'config' },
+    ],
+  })
+  const harness = mount({ draft: '帮我写个脚本' })
+  harness.view()
+  await tick()
+
+  const closed = harness.view()
+  assert.notEqual(closed.presetToggle, null, '有风格就必须出现下拉框')
+  assert.equal(closed.presetToggle.props['data-selected'], 0, '默认一个都没勾')
+  assert.deepEqual(closed.styleBoxes, [], '菜单没展开时不渲染勾选框')
+
+  await closed.presetToggle.props.onClick()
+  let view = harness.view()
+  assert.deepEqual(
+    view.styleBoxes.map(box => box.props['data-dsh-better-input-style']),
+    ['concise', 'spec'],
+    '两个内置风格都要能勾',
+  )
+  assert.equal(view.styleBoxes.every(box => box.props.type === 'checkbox'), true, '多选必须是复选而不是单选')
+  assert.equal(view.styleBoxes.every(box => box.props.checked === false), true)
+
+  // 勾一个：菜单**不收起**（多选要能连续点），按钮上出现计数。
+  view.styleBoxes[0].props.onChange()
+  view = harness.view()
+  assert.equal(view.menuOpen, true, '勾选不收起菜单（否则没法多选）')
+  assert.equal(view.presetToggle.props['data-selected'], 1)
+  assert.deepEqual(view.styleBoxes.map(box => box.props.checked), [true, false])
+
+  // 再勾一个：两个同时选中。
+  view.styleBoxes[1].props.onChange()
+  view = harness.view()
+  assert.equal(view.presetToggle.props['data-selected'], 2)
+  assert.deepEqual(view.styleBoxes.map(box => box.props.checked), [true, true])
+
+  // 取消第一个：只剩第二个。
+  view.styleBoxes[0].props.onChange()
+  view = harness.view()
+  assert.deepEqual(view.styleBoxes.map(box => box.props.checked), [false, true])
+
+  // 用「按所选风格优化」按钮发起：请求体带上勾选的 id。
+  const pending = view.apply.props.onClick()
+  assert.deepEqual(network.postCalls[0].body, {
+    text: '帮我写个脚本',
+    sessionId: harness.sessionId,
+    styleIds: ['spec'],
+  })
+  network.respond({ data: { text: '条目化后的需求', styleIds: ['spec'] } })
+  await pending
+  assert.equal(harness.truth.draft, '条目化后的需求')
+  assert.equal(harness.view().menuOpen, false, '发起后菜单必须收起')
+})
+await test('勾选保留在按钮上：主按钮也用所选风格（不勾则完全不发 styleIds）', async () => {
+  const network = installFetch({
+    styles: [{ id: 'concise', label: '精简', source: 'default' }],
+  })
+  const harness = mount({ draft: '草稿' })
+  harness.view()
+  await tick()
+
+  await harness.view().presetToggle.props.onClick()
+  harness.view().styleBoxes[0].props.onChange()
+
+  // 主按钮（✨）同样带上勾选的风格——风格是"当前选中的偏好"，不是某一次按钮的专属。
+  const pending = harness.view().optimize.props.onClick()
+  assert.deepEqual(network.postCalls[0].body, {
+    text: '草稿',
+    sessionId: harness.sessionId,
+    styleIds: ['concise'],
+  })
+  network.respond({ data: { text: '改写后' } })
+  await pending
+
+  // 取消勾选后再点：body 里**不能**出现 styleIds（老宿主对此一无所知）。
+  await harness.view().presetToggle.props.onClick()
+  harness.view().styleBoxes[0].props.onChange()
+  const again = harness.view().optimize.props.onClick()
+  assert.deepEqual(network.postCalls[1].body, { text: '改写后', sessionId: harness.sessionId })
+  network.respond({ data: { text: '再改写' } })
+  await again
+})
+await test('内置风格不进"预设"区（避免同一个风格出现两次）', async () => {
+  // 真实部署里 `cordis.patch.yml` 的 presets 就是 concise/spec —— 它们现在是内置风格，
+  // 若原样列进预设区，用户会在菜单里看到两个"精简"。
+  installFetch({
+    styles: [{ id: 'concise', label: '精简', source: 'config' }, { id: 'spec', label: '转规格', source: 'config' }],
+    presets: [{ id: 'concise', label: '精简' }, { id: 'spec', label: '转规格' }, { id: 'shorter', label: '更短' }],
+  })
+  const harness = mount({ draft: '草稿' })
+  harness.view()
+  await tick()
+  await harness.view().presetToggle.props.onClick()
+  const view = harness.view()
+  assert.deepEqual(
+    view.presetItems.map(item => item.props['data-dsh-better-input-preset']),
+    ['shorter'],
+    '与风格同 id 的预设要从预设区剔除，只剩真正的一次性预设',
+  )
+  assert.deepEqual(view.styleBoxes.map(box => box.props['data-dsh-better-input-style']), ['concise', 'spec'])
+})
+await test('风格与预设可以同时选：一次请求同时带 presetId 与 styleIds', async () => {
+  const network = installFetch({
+    styles: [{ id: 'spec', label: '转规格', source: 'default' }],
+    presets: [{ id: 'shorter', label: '更短' }],
+  })
+  const harness = mount({ draft: '草稿' })
+  harness.view()
+  await tick()
+  await harness.view().presetToggle.props.onClick()
+  harness.view().styleBoxes[0].props.onChange()
+  const pending = harness.view().presetItems[0].props.onClick()
+  assert.deepEqual(network.postCalls[0].body, {
+    text: '草稿',
+    sessionId: harness.sessionId,
+    presetId: 'shorter',
+    styleIds: ['spec'],
+  })
+  network.respond({ data: { text: '改写后' } })
+  await pending
+})
+await test('客户端与宿主的风格字段镜像必须一致（漂移就红）', async () => {
+  // 客户端 bundle 不能 import policy.js，所以 STYLE_IDS / stylePromptField 是镜像。
+  // 这里把镜像与宿主的权威清单对齐：加了第三个风格却忘了改客户端，会当场失败。
+  const page = mountSettings({ settingsValue: {} })
+  await page.view().action('reset').props.onClick()
+  const fields = page.scope.mutations[0].ops.map(op => op.path[0])
+  for (const field of HOST_STYLE_FIELDS) {
+    assert.equal(fields.includes(field), true, `宿主的风格字段 ${field} 必须被客户端覆盖（保存/重置链路）`)
+  }
+  assert.equal(HOST_STYLE_FIELDS.length, HOST_STYLE_IDS.length)
+  // 宿主的 settings 字段总清单必须被客户端的重置清单完全覆盖，反之亦然。
+  assert.deepEqual([...fields].sort(), [...SETTINGS_FIELD_KEYS].sort())
 })
 await test('长度上限以宿主为准：本地先说清楚，不发请求', async () => {
   const network = installFetch({
@@ -1455,13 +1672,84 @@ await test('恢复默认：对所有字段发 unset，回到默认与组合配�
   await page.view().action('reset').props.onClick()
   assert.equal(page.scope.mutations.length, 1)
   const { ops } = page.scope.mutations[0]
-  assert.equal(ops.length, 7)
+  // 7 个通用字段 + 每个优化风格 1 个提示词字段（重置必须连风格提示词一起清掉，
+  // 否则"恢复默认"会留下一个改不掉的风格提示词）。
+  assert.equal(ops.length, 7 + HOST_STYLE_IDS.length)
   assert.equal(ops.every(op => op.op === 'unset'), true)
   assert.deepEqual(ops.map(op => op.path[0]).sort(), [
     'customPromptEnabled', 'maxOutputTokens', 'modelId', 'modelProvider', 'systemPrompt', 'temperature', 'timeoutMs',
+    ...HOST_STYLE_FIELDS,
   ].sort())
   assert.equal(page.view().noteText, 'settings.resetDone')
 })
+console.log('client half: 每个优化风格的独立提示词（P6.2）')
+await test('设置页为每个风格渲染独立提示词框，并标出当前生效来源', async () => {
+  const page = mountSettings({
+    styles: [
+      { id: 'concise', label: '精简', source: 'config' },
+      { id: 'spec', label: '转规格', source: 'default' },
+    ],
+    settingsValue: { stylePromptConcise: '我的压缩要求' },
+  })
+  page.view()
+  await tick()                        // 等 /catalog 落地（风格清单与生效来源都要宿主下发）
+  const view = page.view()
+  const concise = view.inputs.get('stylePromptConcise')
+  const spec = view.inputs.get('stylePromptSpec')
+  assert.ok(concise !== undefined, '「精简」必须有独立提示词输入框')
+  assert.ok(spec !== undefined, '「转规格」必须有独立提示词输入框')
+  assert.equal(concise.props.value, '我的压缩要求', '有用户值时回显用户自己的值')
+  assert.equal(spec.props.value, '', '没配的风格留空（宿主侧提示词正文不下发）')
+  assert.equal(concise.props.disabled, false)
+  // 生效来源用词典标签渲染，让用户知道"空着的时候用的是哪一层"。
+  const hints = []
+  const walk = (element) => {
+    if (element === null || typeof element !== 'object') return
+    if (typeof element.props?.className === 'string' && element.props.className.includes('dsh-bi-hint')) {
+      hints.push(childrenOf(element)[0])
+    }
+    for (const child of childrenOf(element)) walk(child)
+  }
+  walk(view.node)
+  assert.equal(hints.some(text => String(text).includes('settings.source.config')), true, '要标出组合层来源')
+  assert.equal(hints.some(text => String(text).includes('settings.source.default')), true, '要标出内置默认来源')
+})
+await test('逐风格提示词保存：只发变化的那个字段，清空发 unset', async () => {
+  const page = mountSettings({
+    styles: [{ id: 'concise', label: '精简', source: 'default' }, { id: 'spec', label: '转规格', source: 'default' }],
+    settingsValue: { stylePromptConcise: '旧值' },
+  })
+  page.view().inputs.get('stylePromptConcise').props.onChange({ target: { value: '新值' } })
+  await page.view().action('save').props.onClick()
+
+  assert.equal(page.scope.mutations.length, 1)
+  // 只发改动过的那个风格字段：另一个既没配也没改，不该出现在 ops 里。
+  assert.deepEqual(page.scope.mutations[0].ops, [
+    { op: 'set', path: ['stylePromptConcise'], value: '新值' },
+  ])
+  assert.equal(page.view().noteText, 'settings.saved')
+  // 保存后镜像里的值就是新值（opsApplied 自查通过，不是假报成功）。
+  assert.equal(page.scope.getSnapshot().value.stylePromptConcise, '新值')
+
+  // 清空 → unset（回落到组合配置/内置默认）。
+  page.view().inputs.get('stylePromptConcise').props.onChange({ target: { value: '  ' } })
+  await page.view().action('save').props.onClick()
+  assert.deepEqual(page.scope.mutations[1].ops, [{ op: 'unset', path: ['stylePromptConcise'] }])
+  assert.equal(page.scope.getSnapshot().value.stylePromptConcise, undefined)
+})
+await test('宿主没给风格清单（离线/旧宿主）时，表单仍可按镜像 id 渲染并保存', async () => {
+  const page = mountSettings({ styles: [], settingsValue: {} })
+  const view = page.view()
+  // 离线时标签退回词典（style.concise / style.spec），字段名不变——保存链路不受影响。
+  assert.ok(view.inputs.get('stylePromptConcise') !== undefined)
+  assert.ok(view.inputs.get('stylePromptSpec') !== undefined)
+  view.inputs.get('stylePromptSpec').props.onChange({ target: { value: '离线填的' } })
+  await page.view().action('save').props.onClick()
+  assert.deepEqual(page.scope.mutations[0].ops, [
+    { op: 'set', path: ['stylePromptSpec'], value: '离线填的' },
+  ])
+})
+
 await test('远端提交后（未在编辑）表单会同步成新值', async () => {
   const page = mountSettings({ settingsValue: { systemPrompt: '旧值' } })
   assert.equal(page.view().inputs.get('systemPrompt').props.value, '旧值')
