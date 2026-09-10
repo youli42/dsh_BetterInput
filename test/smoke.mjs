@@ -1088,6 +1088,32 @@ await test('只读路由同样走信任围栏与体积上限', async () => {
   assert.equal(huge.status, 413)
 })
 
+await test('闸门不再泄漏：占位后抛错的路径（未知预设 / 没有模型路由）必须归还名额', async () => {
+  // 这是 f4b190e 把占位逻辑移进 prepareCall 时引入的回归：systemPromptFor / resolveRoute
+  // 都在 acquire **之后**求值，一抛就让已占位的名额随调用栈丢失——该会话之后恒 409、
+  // 累计满额后全局恒 429，直到宿主重启。下面把两条真实触发路径都钉住。
+  const unknownPreset = setup({ maxConcurrentCalls: 1 }, {
+    chunks: TEXT_CHUNKS,
+    selection: { provider: 'p', model: 'm' },
+  })
+  const preset = await drive(fakeRequest({ body: JSON.stringify({ text: 'x', presetId: 'nope' }) }))
+  assert.equal(preset.status, 400)
+  assert.equal(preset.json.error, 'unknown-preset')
+  // 同一个会话必须还能正常发起（若名额泄漏，这一次会拿到 409 busy-session）。
+  const afterPreset = await drive(fakeRequest({ body: '{"text":"x"}' }))
+  assert.equal(afterPreset.status, 200, '未知预设失败后名额必须已归还')
+  assert.equal(unknownPreset.calls.length, 1)
+
+  // 没有模型路由（新装 / 还没选过默认模型）同样在占位后抛错。
+  setup({ maxConcurrentCalls: 1 }, { chunks: TEXT_CHUNKS })
+  const first = await drive(fakeRequest({ body: '{"text":"x"}' }))
+  assert.equal(first.status, 502)
+  assert.equal(first.json.error, 'no-model-route')
+  const second = await drive(fakeRequest({ body: '{"text":"x"}' }))
+  assert.equal(second.status, 502, '第二次仍应是 502，而不是被泄漏的名额挡成 409')
+  assert.equal(second.json.error, 'no-model-route')
+})
+
 console.log('')
 if (failures.length > 0) {
   console.error(`${String(failures.length)} 个用例失败，${String(passed)} 个通过`)
