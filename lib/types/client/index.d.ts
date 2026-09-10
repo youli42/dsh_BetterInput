@@ -74,9 +74,14 @@ export declare function apply(ctx: unknown): void
 
 /** 宿主路由（与宿主半 lib/policy.js 的一组常量一致）。 */
 export declare const ROUTE = '/api/dsh-input-optimizer/optimize'
+export declare const ROUTE_STREAM = '/api/dsh-input-optimizer/optimize/stream'
 export declare const ROUTE_CATALOG = '/api/dsh-input-optimizer/catalog'
 export declare const ROUTE_CATALOG_MODELS = '/api/dsh-input-optimizer/catalog/models'
 export declare const ROUTE_CHECK = '/api/dsh-input-optimizer/check'
+export declare const ROUTE_OPEN_CONFIG = '/api/dsh-input-optimizer/open-config'
+
+/** 内置优化风格 id（客户端镜像；与宿主 `STYLE_IDS` 有跨包对拍用例钉住）。 */
+export declare const STYLE_IDS: readonly string[]
 
 /** 座位 key：模型选择器紧左边。 */
 export declare const SEAT = 'conversation.input.right'
@@ -116,9 +121,18 @@ export interface BetterInputSettingsInjected {
       providers?: Array<{ id: string, name: string }>
       /** 设置命名空间状态：`available=false` 时 `reason` 是宿主侧原因（注册失败消息），用于排查。 */
       settings?: { available?: boolean, reason?: string, section?: Record<string, unknown> }
+      /** 内置优化风格：只有 id/label/**生效来源**，提示词正文留在宿主。 */
+      styles?: Array<{ id: string, label?: string, source?: 'settings' | 'config' | 'default' }>
+      /** 插件配置文件的绝对路径（宿主按自己的模块位置解析），给「打开配置文件」用。 */
+      configPath?: string
       effective?: Record<string, unknown>
     }>
     models: (provider: string) => Promise<Array<{ id: string, name: string }>>
     check: (provider: string, model: string) => Promise<{ ok?: boolean, message?: string, name?: string, context?: number, defaultMaxTokens?: number }>
+    /**
+     * 请宿主用系统默认程序打开插件配置文件。
+     * 失败时 `message` 是宿主给的可展示原因（找不到文件 / 平台不支持 / 起不来），一定带绝对路径。
+     */
+    openConfig: () => Promise<{ ok: boolean, path?: string, openedWith?: string, message?: string }>
   }
 }

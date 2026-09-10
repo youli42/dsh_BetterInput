@@ -264,6 +264,53 @@ P1 的路由此后仍需在真机上 curl 一次（单测用假 LLM 流覆盖了
 
 ---
 
+### P6.1–P6.4（多选优化风格 / 逐风格提示词 / 打开配置文件 / 启动耗时，2026-09-11）
+
+37. **风格为什么"内置"而不是"从 `presets` 读清单"**：需求是"每个优化风格单独配提示词"，而
+    设置命名空间的字段必须**可枚举**——`SettingsScope` 的 path ops 按字段名寻址、宿主 schema 也是静态的。
+    `config.presets` 的 id 是部署方随便起的，没有静态字段名就落不了地。所以风格清单固定在
+    `lib/policy.js` 的 `STYLE_DEFINITIONS`（`concise`=精简、`spec`=转规格），**提示词**才是可配的部分。
+    代价：客户端 bundle 不能 import 宿主的清单（见 §7.3），所以 `STYLE_IDS`/`stylePromptField` 在
+    `lib/client.js` 有一份镜像——用一条**跨包对拍**的用例钉住（客户端的重置 ops 必须与宿主
+    `SETTINGS_FIELD_KEYS` 完全一致），而不是靠"记得同步改两处"。
+38. **提示词三层覆盖，且刻意保留组合层这一档**：设置页字段 ← `config.presets` 里**同 id** 的项 ← 内置默认。
+    保留中间那档是**兼容性要求**：老部署原来就把"精简/转规格"的提示词写在 `cordis.patch.yml` 的
+    `presets` 里，升级后行为必须一字不差（实测 `source` 会如实标成 `config`）。设置页只是多了一层更高的优先级。
+39. **逐风格提示词用扁平字段**（`stylePromptConcise`）而不是嵌套结构：客户端 `buildOps`/`opsApplied`
+    都按**单段 path** 寻址并逐字段比对（`section[op.path[0]] === op.value`），嵌套要同时改这两处的语义；
+    扁平还让"恢复默认"继续是一串 `unset`。字段名由 `STYLE_DEFINITIONS` 生成，schema、跨字段校验、
+    `SETTINGS_FIELD_KEYS`（重置清单）与客户端表单四处不会各说各话。
+40. **风格提示词正文不下发**（与 `presets` 同一条规矩，README 里那条"prompt 绝不下发"的断言也覆盖了风格）：
+    `/catalog` 只给 `id`/`label`/**来源**。设置页那几栏显示的是**用户自己填的值**，空着时用来源标签
+    告诉用户"现在用的是哪一层"。拼装顺序固定为**基础 → 风格（按清单顺序，不是点击顺序）→ 预设**，
+    这样同一组选择无论怎么点出来，system prompt 都逐字节相同。
+41. **闸门泄漏的修复（f4b190e 引入的回归）**：`prepareCall` 里 `gate.acquire()` 原本排在
+    `systemPromptFor()`/`resolveRoute()` **之前**，而这两处都会抛（未知预设 400 / 没有模型路由 502）——
+    一抛就让已占位的名额随调用栈丢失（两个处理器只在 `prepareCall` 正常返回后才把 `slot` 赋给外层变量，
+    `finally` 里的 `slot?.release?.()` 释放不到）。后果：该会话之后**恒 409**、累计满额后全局**恒 429**，
+    只能重启宿主，而 UI 还给出与实际状态无关的"已经在优化中了"。触发条件恰好是新装/首用（还没选模型）。
+    修法是**把占位挪到所有会抛的校验之后**（也正是那句注释原本的意思），并补两条回归用例
+    （"未知预设失败后同一会话必须还能发起"、"no-model-route 之后第二次仍是 502 而不是 409"）。
+    守卫里加了一条**顺序断言**（`after`），因为"每一句都还在、只是先后错了"正是这类回归的形态——
+    实测把顺序改回去，守卫立刻红。
+42. **打开配置文件：路径由宿主解析，且不假设有文件关联**：路径用**模块自身位置**推
+    （`new URL('..', import.meta.url)` + `PLUGIN_CONFIG_FILENAME`），因为 `link:` 安装指向仓库、
+    正式安装指向 profile 的 `node_modules`，前端拼不出来；文件名与 `dsh.bundle.patch` 同源。
+    打开方式**不能只写"交给系统默认关联"**：`.yml` 在不少 Windows 机器上没有关联
+    （本机实测 `assoc .yml` → `File association not found`），`explorer.exe` 只会弹"你要如何打开这个文件？"，
+    按钮就变成"点了没反应"。所以给一条按优先级试的候选链（Windows：VS Code 的 `Code.exe` → `notepad.exe`），
+    并且 Windows 上刻意不用 PATH 上的 `code`（它是 `.cmd`，Node 18.20/20.12 起禁止无 shell spawn `.cmd`）。
+    它还是**能力路由**（会在宿主上起进程）→ 准入与 `/optimize` 同级，必须有浏览器会话。
+43. **Web 启动耗时：结论是没有插件侧阻塞**。方法、原始数据与那次未能复现的 29.7 s 异常都记在
+    `.perf/README.md`：12 轮基线 median 1886 ms，交替 A/B 的插件边际成本 **~5 ms**（差值在
+    −18 ~ +53 ms 之间变号 = 抖动），阶段归因显示 95% 的耗时在"导入所有插件模块 + 挂载 cordis 树"。
+    代码级核对：`apply()` 全同步、无同步 I/O、无启动期 await（所有 `await` 都在请求处理器里），
+    设置注册走 `ctx.inject` 不阻塞（见 R-20）。测量本身也有两条踩坑记录值得留着：
+    launcher 的 flag 必须排在 `web` 之前（否则 `--patch` 被透传给内层 app 报 unknown option），
+    以及受限沙箱下要用文件重定向而不是 `stdio: 'pipe'` 抓子进程输出。
+
+---
+
 ## 1. 需求拆解
 
 | # | 需求 | 落点 |
@@ -723,6 +770,10 @@ window.__ModuleLoader__.load({
 | **P5.5** 并发闸门 | 同会话单航班（409）+ 全局并发上限（429，默认 4，可配 `maxConcurrentCalls`） | ✅ 已实现（2026-09-11；见 §0.5 第 29 条） |
 | **P5.7** 工程化 | Biome lint + 约定守卫 + 真 React 渲染测试 + CI（Windows） | ✅ 已实现（2026-09-11；见 §0.5 第 30–31 条） |
 | **P5.6** 流式回填 | `/optimize/stream`（SSE）+ 客户端增量回填/节流/还原/回退 | ✅ 已实现（2026-09-11；见 §0.5 第 32–36 条） |
+| **P6.1** 多选优化风格 | ▾ 下拉框里勾选「精简 / 转规格」（可叠加），请求带 `styleIds` | ✅ 已实现（2026-09-11；见 §0.5 第 37–40 条） |
+| **P6.2** 逐风格提示词 | 设置页为每个风格单独配提示词；生效顺序：内置 ← 组合配置同 id 预设 ← 设置页 | ✅ 已实现（2026-09-11；同一节） |
+| **P6.3** 打开插件配置文件 | 设置页一键用编辑器打开 `cordis.patch.yml`，失败有明确提示（候选人链 + 能力路由准入） | ✅ 已实现（2026-09-11；见 §0.5 第 42 条） |
+| **P6.4** Web 启动耗时 | 基线/边际成本测量与阶段归因，确认无插件侧阻塞 | ✅ 已完成（2026-09-11；见 §0.5 第 43 条与 `.perf/README.md`） |
 | **P5.7b / 5.7c / 5.8** | typecheck（需有网环境）、vitest+jsdom、芯片保留 | ⬜ 待做（见 README「下一步」） |
 
 ---
@@ -758,6 +809,12 @@ window.__ModuleLoader__.load({
 | R-25 | CI 的宿主依赖版本写死（`@deepseek-ai/*@0.1.2-rc.1`） | dsh 升级后 CI 可能装不上或与本地版本不一致 | dsh 升级时同步 `.github/workflows/ci.yml` 里的版本与 README 记录 |
 | R-26 | 流式下的 CAS 判据变了（文本集合 vs revision）：若用户手改后的文本**恰好等于**我们写过的某一版，会被当成"未改动"而覆盖 | 极低概率下覆盖一次用户输入 | 判据写在 §0.5 第 35 条；要彻底消除需要框架提供"写入来源"标记，当前不接受为此增加复杂度 |
 | R-27 | 节流 80ms：最后一段增量可能只在收尾时写入，观感上"末尾跳一下" | 轻微观感问题，不丢内容 | 收尾一定写 `done` 的权威文本（有专门用例） |
+| R-28 | **闸门名额可能被抛错路径吃掉**（P5.6 引入的回归，P6.1 已修）：`gate.acquire()` 原本排在 `systemPromptFor()`/`resolveRoute()` 之前，这两处一抛（未知预设 400 / 没有模型路由 502）名额就随栈丢失 | 该会话之后恒 409、累计满额后全局恒 429，**只能重启宿主**；新装/首用（还没选模型）就会命中 | 已修：占位挪到所有会抛的校验之后；两条回归用例 + 守卫的**顺序断言**（`after`）钉住。机制与证据见 §0.5 第 41 条 |
+| R-29 | **风格提示词是"内置清单 + 设置覆盖"**：清单写死在代码里，客户端还有一份 id/字段名的镜像 | 清单漂移（宿主加了第三个风格、客户端没跟上）会让新风格在设置页配不了 | 客户端镜像由跨包对拍用例钉住（客户端重置 ops 必须等于宿主 `SETTINGS_FIELD_KEYS`）；守卫另有 3 条盯"必须校验 id / 必须下发清单不下发正文" |
+| R-30 | **打开配置文件依赖宿主上真的装了编辑器**：候选链 Windows 是 `Code.exe` → `notepad.exe` | 两个都没有（极精简的 Windows 容器）时按钮只能报错并给绝对路径 | 候选链里 `notepad.exe` 属系统自带，实际不会双双缺失；失败文案一定带绝对路径，用户可手动打开 |
+| R-31 | **流式中途手改的提示在真实浏览器里可能不出现**：`controller.abort()` 会让 `reader.read()` 抛 AbortError，被 `catch` 里的 `if (!controller.signal.aborted)` 静默吞掉，承诺的「草稿已变化」几乎不可达（`test/client.smoke.mjs` 那条用例断言到的其实是收尾 CAS 失败那条分支） | 草稿被停掉但用户看不到任何说明 | **本轮未修**（属 P5.6 遗留，改动会触及行为与文案，超出本轮四项范围）。一行修法：在 `catch` 里对 `userEdited` 补一次 `flash(t('staleResult'), 'warn')` |
+| R-32 | **客户端"无 `response.body` → 回退"没先取消在飞的流式请求**：同一 `controller`、同一 `sessionId` 直接再发一次 JSON，会撞上同会话闸门拿 409 | 该环境（拿不到 `response.body`）功能全废、提示误导，且被放弃的流式请求仍会跑完（白烧 token） | **本轮未修**（P5.6 遗留）。修法：回退前 `abort()` + `response.body?.cancel()` 并等宿主断开，或该分支直接报错（无 body 就没有增量，回退只对旧宿主 404/405 有意义） |
+| R-33 | **菜单的"点外面关闭"会把"点菜单内部"一起吃掉**：document 上的 `mousedown` 监听收到所有冒泡事件，包括风格勾选框的 | 勾第一个风格就把菜单收起来，**多选根本用不了**（单选的预设菜单看不出这个问题——它点完本来就要收起） | 已修：`onDown` 用 `event.target.closest('[data-dsh-better-input-menu]')` 判一次"在不在菜单里"。配套把测试替身的 `addEventListener` 从空函数换成**真的登记表**，否则这条缺陷测不出来——并实测把判断去掉后该用例立刻红 |
 
 ---
 
@@ -794,4 +851,5 @@ P0 期曾把「最小可跑骨架」抄在这里，但骨架会与真实代码�
 | 行为与接口契约（含撤销/取消语义、mutate 的失败语义） | [`lib/types/client/index.d.ts`](./lib/types/client/index.d.ts) |
 | 宿主契约与错误码清单 | [`lib/types/index.d.ts`](./lib/types/index.d.ts) |
 | 开发/`link:` 安装所需的依赖软链 | [`scripts/link-dev-deps.mjs`](./scripts/link-dev-deps.mjs)、[`scripts/dsh-packages.mjs`](./scripts/dsh-packages.mjs) |
-| 可执行的行为说明（49 + 48 + 6 + 3 = 106 例）+ 约定守卫 | [`test/smoke.mjs`](./test/smoke.mjs)、[`test/client.smoke.mjs`](./test/client.smoke.mjs)、[`test/settings-activation.mjs`](./test/settings-activation.mjs) |
+| 可执行的行为说明（59 + 60 + 6 + 4 = 129 例）+ 约定守卫（18 条） | [`test/smoke.mjs`](./test/smoke.mjs)、[`test/client.smoke.mjs`](./test/client.smoke.mjs)、[`test/settings-activation.mjs`](./test/settings-activation.mjs) |
+| Web 启动耗时基准与测量报告 | [`.perf/README.md`](./.perf/README.md)、[`.perf/measure-startup.mjs`](./.perf/measure-startup.mjs)、[`.perf/ab-startup.mjs`](./.perf/ab-startup.mjs) |

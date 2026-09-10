@@ -14,12 +14,22 @@ export declare const inject: readonly ['webServer', 'llm']
 
 /** 能力路由：优化输入内容。 */
 export declare const ROUTE = '/api/dsh-input-optimizer/optimize'
+/** 流式优化路由（SSE）；客户端默认走它，`ROUTE` 是回退。 */
+export declare const ROUTE_STREAM = '/api/dsh-input-optimizer/optimize/stream'
 /** 目录 + 当前生效配置（设置页首屏用）。 */
 export declare const ROUTE_CATALOG = '/api/dsh-input-optimizer/catalog'
 /** 某 provider 的模型列表。 */
 export declare const ROUTE_CATALOG_MODELS = '/api/dsh-input-optimizer/catalog/models'
 /** 试调一条模型路由（只解析，不发真实请求）。 */
 export declare const ROUTE_CHECK = '/api/dsh-input-optimizer/check'
+/** 用系统默认程序打开插件配置文件（会在宿主上起进程 → 能力路由，要求浏览器会话）。 */
+export declare const ROUTE_OPEN_CONFIG = '/api/dsh-input-optimizer/open-config'
+
+/** 插件配置文件名（相对包根；与 package.json 的 `dsh.bundle.patch` 同源）。 */
+export declare const PLUGIN_CONFIG_FILENAME = 'cordis.patch.yml'
+
+/** 内置优化风格的 id（客户端可多选；提示词逐项可配）。 */
+export declare const STYLE_IDS: readonly ['concise', 'spec']
 
 /** 用户设置命名空间：宿主注册、客户端 `settingsScope` 绑定同一个。 */
 export declare const SETTINGS_NAMESPACE = 'better-input'
@@ -40,6 +50,10 @@ export interface BetterInputSettingsSection {
   maxOutputTokens?: number
   /** 单次调用超时（毫秒）。 */
   timeoutMs?: number
+  /** 「精简」风格的独立提示词；留空 = 用组合配置同 id 的预设 / 内置默认。 */
+  stylePromptConcise?: string
+  /** 「转规格」风格的独立提示词；留空 = 用组合配置同 id 的预设 / 内置默认。 */
+  stylePromptSpec?: string
 }
 
 /** 插件配置（全部可选；优先级低于设置页里的用户设置）。 */
@@ -63,7 +77,7 @@ export interface Config {
 }
 
 /**
- * 宿主半入口：挂载 4 条路由并注册设置命名空间。
+ * 宿主半入口：挂载 6 条路由并注册设置命名空间。
  * @param ctx - 需要提供 `webServer` 与 `llm` 的宿主上下文。
  * @param config - 插件配置。
  */
@@ -85,9 +99,30 @@ export declare function effectiveConfig(
   temperature?: number
   maxOutputTokens: number
   timeoutMs: number
+  /** 每个风格的生效提示词与它来自哪一层（正文**不下发**给浏览器）。 */
+  styles: ReadonlyArray<{ id: string, label: string, prompt: string, source: 'settings' | 'config' | 'default' }>
   /** 每个值实际来自哪一层，供设置页如实标注。 */
   sources: { prompt: string, model: string, temperature: string, limits: string }
 }
+
+/**
+ * 校验请求体里的 `styleIds`（多选优化风格）：去重、未知 id 报 400。
+ * @param raw - 请求体里的 styleIds。
+ * @returns 校验后的风格 id 列表。
+ */
+export declare function parseStyleIds(raw: unknown): string[]
+
+/**
+ * 打开配置文件的候选命令（按优先级；纯函数，便于单测）。
+ * @param platform - `process.platform`。
+ * @param target - 文件绝对路径。
+ * @param roots - 安装位置根目录（测试注入用）。
+ */
+export declare function openerCandidates(
+  platform: string,
+  target: string,
+  roots?: { localAppData?: string, programFiles?: string, programFilesX86?: string },
+): ReadonlyArray<{ file: string, args: string[] }>
 
 /**
  * 校验设置段的跨字段约束（schema 之外的部分）；规则的客户端镜像在 lib/client.js。
@@ -104,15 +139,17 @@ export interface OptimizeResponse {
   modelUsed: { provider: string, model: string }
   /** 命中的预设 id。 */
   presetId?: string
+  /** 本次选中的优化风格（一个都没选时**不带这个字段**）。 */
+  styleIds?: string[]
   /** 输出被 maxTokens 截断。 */
   truncated?: true
 }
 
 /** 一次失败响应。 */
 export interface OptimizeFailure {
-  /** 机器可读错误码：bad-request | empty-text | text-too-long | unknown-preset |
+  /** 机器可读错误码：bad-request | empty-text | text-too-long | unknown-preset | unknown-style |
    * body-too-large | forbidden | method-not-allowed | no-model-route | model-failed |
-   * timeout | client-gone。 */
+   * timeout | client-gone | config-missing | open-failed | open-unsupported。 */
   error: string
   /** 面向用户的说明（前端可直接展示）。 */
   message: string

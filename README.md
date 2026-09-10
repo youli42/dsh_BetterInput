@@ -22,9 +22,13 @@ DSH Web GUI 插件：在**模型选择器左侧**加一个「AI 优化输入」�
 | P5.5 | 并发闸门：同会话单航班（409）+ 全局并发上限（429） | ✅ 已实现（2026-09-11） |
 | P5.7 | 工程化：Biome lint、约定守卫、真 React 渲染测试、CI | ✅ 已实现（2026-09-11） |
 | P5.6 | 流式回填：/optimize/stream（SSE）边生成边替换草稿，失败还原原文 | ✅ 已实现（2026-09-11） |
+| P6.1 | **多选优化风格**：▾ 下拉框里勾选「精简 / 转规格」，可叠加，请求带 `styleIds` | ✅ 已实现（2026-09-11） |
+| P6.2 | **逐风格提示词**：设置页为每个风格单独配提示词（内置 ← 组合配置 ← 设置页） | ✅ 已实现（2026-09-11） |
+| P6.3 | **打开插件配置文件**：设置页一键用编辑器打开 `cordis.patch.yml`，失败有明确提示 | ✅ 已实现（2026-09-11） |
+| P6.4 | **Web 启动耗时排查**：基线 1886ms/12 轮，插件边际成本 ~5ms，无阻塞（见 `.perf/README.md`） | ✅ 已完成（2026-09-11） |
 | P5.7b / P5.7c / P5.8 | typecheck（缺 tsc）、vitest+jsdom、芯片保留 | ⬜ 待做（见「下一步」与「工程化」） |
 
-检查：lint 零发现 · 约定守卫 11 条 · 测试 49 + 48 + 6 + 3 = 106 例，全绿
+检查：lint 零发现 · 约定守卫 18 条 · 测试 59 + 60 + 6 + 4 = 129 例，全绿
 （`npm run verify` = lint + 全部检查；`npm test` 会先自动补齐 dev 依赖链接）。
 
 > **运行前提**：仓库里没有 `node_modules` 时，`npm test` 与 `link:` 方式安装后的运行时都跑不起来
@@ -36,19 +40,20 @@ DSH Web GUI 插件：在**模型选择器左侧**加一个「AI 优化输入」�
 package.json          双半声明：main(lib/index.js) + exports["./client"] + dsh.client/bundle
 biome.json            lint 配置（只 lint 不 format，见「工程化」）
 cordis.patch.yml      bundle patch + 组合层配置（设置页的用户值优先于它）
-lib/index.js          宿主半：5 条路由（一次性 JSON + 流式 SSE）+ LLM 调用 + 并发闸门
+lib/index.js          宿主半：6 条路由（一次性 JSON + 流式 SSE + 目录/试调 + 打开配置文件）+ LLM 调用 + 并发闸门
 lib/settings.js       宿主半：设置命名空间 schema 与跨字段校验（注册挂在 settings 就绪时）
-lib/policy.js         策略层：零依赖，配置校验/信任围栏/生效配置解析（可独立单测）
-lib/client.js         浏览器半：输入框按钮 + 预设菜单 + 撤销栈 + 设置页（手写 __ModuleLoader__ bundle）
+lib/policy.js         策略层：零依赖，配置校验/信任围栏/生效配置解析/风格提示词分层（可独立单测）
+lib/client.js         浏览器半：输入框按钮 + 多选风格菜单 + 撤销栈 + 设置页（手写 __ModuleLoader__ bundle）
 lib/types/*.d.ts      对外类型
-scripts/check-guards.mjs  约定守卫：把踩过的坑变成可自动检查的规则
+.perf/                Web 启动耗时基准脚本与测量报告（README.md 有方法与原始数据）
+scripts/check-guards.mjs  约定守卫：把踩过的坑变成可自动检查的规则（18 条）
 scripts/dsh-packages.mjs  定位 dsh 安装与其中的宿主包（脚本与测试共用）
 scripts/link-dev-deps.mjs 把宿主依赖软链进本仓库（`npm test` 前自动跑；CI 里自动跳过）
 scripts/lint.mjs      找 Biome 并跑 lint（仓库内 / 全局安装都能用）
-test/smoke.mjs        宿主半冒烟测试（49 例）
-test/client.smoke.mjs 浏览器半冒烟测试（48 例：接线、流式回填、预设菜单、宿主下发规则、撤销栈、设置页）
+test/smoke.mjs        宿主半冒烟测试（59 例）
+test/client.smoke.mjs 浏览器半冒烟测试（60 例：接线、流式回填、多选风格、预设菜单、撤销栈、设置页）
 test/client.react.mjs 真 React 渲染测试（6 例：真 react/react-dom SSR，含"不得有 React 警告"）
-test/settings-activation.mjs 真框架集成测试（3 例：真实 cordis + 真实 settings 提供者）
+test/settings-activation.mjs 真框架集成测试（4 例：真实 cordis + 真实 settings 提供者，含逐风格提示词全链路）
 .github/workflows/ci.yml  CI：lint + 约定守卫 + 四个套件（Windows）
 DESIGN.md             设计依据：座位/接口证据、撤销方案、提示词分层、风险清单
 LICENSE               MIT
@@ -130,14 +135,22 @@ curl.exe -s http://127.0.0.1:3080/api/dsh-input-optimizer/catalog
 # 若为 false，会同时带出宿主侧原因："reason":"..."
 ```
 
-   宿主日志里应同时出现两行：`better-input: mounted /api/dsh-input-optimizer/optimize (+catalog/check)`
+   宿主日志里应同时出现两行：`better-input: mounted /api/dsh-input-optimizer/optimize (+stream/catalog/check/open-config)`
    与 `better-input: settings namespace "better-input" registered`。
    设置页保存后 `$DSH_HOME/settings.yaml` 里应出现 `better-input:` 段，`catalog` 的
    `sources.*` 也从 `config`/`default` 变为 `settings`。
-4. **P5.3（预设菜单）**：`cordis.patch.yml` 的 `presets` 非空时，✨ 右侧出现 `▾`；
-   展开后点某一项 → 请求体里带 `presetId`（可用 DevTools 的 Network 面板确认）。
-   没配预设时 `▾` 不出现，界面与从前一致。
-5. **P5.4（宿主会话）**：`POST /optimize` 需要浏览器会话（页面 cookie 由 `dsh web` 打印的
+4. **P6.1/P6.2（多选风格 + 逐风格提示词）**：✨ 右侧的 `▾` 里出现「精简 / 转规格」两个**勾选框**
+   （按钮上带已选数量，如 `▾2`）；勾选不收起菜单。勾上「转规格」后点 ✨，DevTools → Network 里
+   请求体应带 `"styleIds":["spec"]`。到设置页「输入优化 → 优化风格提示词」给「转规格」填一段自己的
+   文案并保存，再优化一次：请求里的 `styleIds` 不变，但宿主日志/效果应体现新提示词
+   （`/catalog` 的 `styles[].source` 会从 `config`/`default` 变成 `settings`）。
+5. **P6.3（打开配置文件）**：设置页底部点「打开插件配置文件」→ 用编辑器打开
+   `F:\dsh\dsh_BetterInput\cordis.patch.yml`（设置页上同时显示这个绝对路径）。
+   可用 `node .perf/verify-open-config.mjs` 走同一条链路做命令行验收。
+6. **P5.3（预设菜单）**：`cordis.patch.yml` 里配了**非风格 id** 的 `presets` 时，`▾` 菜单下半部分
+   列出它们；点某一项 → 请求体里带 `presetId`（可用 DevTools 的 Network 面板确认）。
+   一个都没配时只有风格区，界面与从前一致。
+7. **P5.4（宿主会话）**：`POST /optimize` 需要浏览器会话（页面 cookie 由 `dsh web` 打印的
    带 token 的 URL 换取）。命令行只做排查时用只读路由：
 
 ```powershell
@@ -149,15 +162,16 @@ curl.exe -s -X POST http://127.0.0.1:3080/api/dsh-input-optimizer/check `
 # Application → Cookies 里那条 dsh 会话 cookie 用 `-b "<name>=<value>"` 带上。
 ```
 
-6. **检查**：
+8. **检查**：
 
 ```powershell
 npm run verify                    # lint + 约定守卫 + 四个套件（推荐）
 npm test                          # 约定守卫 + 宿主半 + 浏览器半 + 真 React + 真框架集成
-node test\smoke.mjs               # 宿主半 49 例：生效配置、信任判定、并发闸门、五路由全链路、SSE 分帧
-node test\client.smoke.mjs        # 浏览器半 48 例：座位、流式回填、预设菜单、宿主下发规则、撤销栈、设置页
+node test\smoke.mjs               # 宿主半 59 例：生效配置、信任判定、并发闸门、六路由全链路、SSE 分帧、多选风格、打开配置文件
+node test\client.smoke.mjs        # 浏览器半 60 例：座位、流式回填、多选风格、预设菜单、逐风格提示词、撤销栈、设置页
 node test\client.react.mjs        # 真 React 6 例：真 react/react-dom SSR 渲染（含"不得有 React 警告"）
-node test\settings-activation.mjs # 真框架集成 3 例：真实 cordis + 真实 settings 提供者，钉住注册时机
+node test\settings-activation.mjs # 真框架集成 4 例：真实 cordis + 真实 settings 提供者，钉住注册时机与逐风格提示词生效链路
+node .perf\measure-startup.mjs 12 # Web 启动耗时基准（12 轮冷启动；详见 .perf/README.md）
 ```
 
 > 各项检查覆盖什么/不覆盖什么、以及 typecheck 为何还没上，见「工程化」一节。
@@ -171,14 +185,16 @@ node test\settings-activation.mjs # 真框架集成 3 例：真实 cordis + 真�
 
 | 场景 | 行为 |
 |---|---|
-| 点击 ✨ | `POST /api/dsh-input-optimizer/optimize`（body `{ text, sessionId }`），成功后 `setDraft` 写回 |
-| 预设菜单（`▾`） | 只在宿主配了 `presets` 时出现；选中后请求带 `presetId`，宿主把该预设的 prompt 追加到 system。菜单向上弹出，点外面或 Esc 收起 |
+| 点击 ✨ | `POST /api/dsh-input-optimizer/optimize/stream`（默认；`/optimize` 是回退），body `{ text, sessionId, styleIds?, presetId? }`，成功后 `setDraft` 写回 |
+| 风格下拉框（`▾`） | 内置风格「精简 / 转规格」以**多选勾选**呈现，按钮上带已选数量（`▾2`）；勾选**不收起菜单**，可以连着勾；勾了就随主按钮/预设一起生效，一个都不勾则完全不发 `styleIds`（行为与从前一致） |
+| 优化风格提示词 | 每个风格在设置页有独立提示词；生效顺序：内置默认 ← `cordis.patch.yml` 里**同 id** 的预设 ← 设置页。见下「优化风格」一节 |
+| 预设菜单（`▾`） | 与风格同 id 的预设不再列进预设区（避免同一个风格出现两次）；其余预设点一次跑一次，请求带 `presetId`，宿主把该预设的 prompt 追加到 system。菜单向上弹出，点外面或 Esc 收起 |
 | 草稿超过宿主上限 | 本地直接提示「草稿过长（n/上限）」，不发请求（上限来自 `/catalog` 的 `limits`） |
 | 流式回填 | 默认走 SSE：增量到达即改写草稿（80ms 节流）；失败/中断会还原原文（详见下节） |
 | 同会话重复请求 | 宿主返回 `409 busy-session`（多标签页同时点同一会话时可见），提示「这个会话已经在优化中了」 |
 | 全局并发打满 | 宿主返回 `429 too-many-requests`（默认上限 4，可用 `maxConcurrentCalls` 调），提示带上限值 |
 | 生成中再点 | **取消**（abort；宿主侧同时取消上游模型调用，不产生费用累积） |
-| 生成中用户继续打字 | 返回时 CAS（`draftRev` + 文本双比对）失败 → **丢弃结果**，提示「草稿已变化」 |
+| 生成中用户继续打字 | 流式下用**"本次调用里我们写过的每一版文本"集合**做 CAS（`draftRev` 每次写入都会推进，不能当基线）：当前草稿落在集合之外即认定用户手改 → 中止本次并提示「草稿已变化」 |
 | 成功后 | 出现 ↶ 撤销按钮；提示 3 秒后自动消失 |
 | 撤销 | CAS 通过才回退到优化前草稿（判据是"当前草稿仍等于 `after`"）；草稿被手改过时第一次点击只警告，**再点一次强制还原** |
 | 撤销深度 | 每会话 10 层，可连按逐层回退；按会话隔离，最多保留 20 个会话（LRU） |
@@ -214,6 +230,71 @@ node test\settings-activation.mjs # 真框架集成 3 例：真实 cordis + 真�
 - **取消/超时**：生成中再点 = 取消（照旧）；超时会给客户端一个 `error: timeout` 事件，
   而客户端自己断了就不再往那条 socket 写。
 
+## 优化风格（P6.1 / P6.2）
+
+「优化风格」是**可多选**的改写口味：勾上「精简」就压篇幅，勾上「转规格」就条目化，两个都勾就叠加。
+
+- **清单是内置的**（`lib/policy.js` 的 `STYLE_DEFINITIONS`：`concise`=精简、`spec`=转规格）。
+  为什么不做成"从 `cordis.patch.yml` 的 presets 读清单"：设置命名空间的字段必须**可枚举**
+  （path ops 按字段寻址、schema 是静态的），而 `presets` 的 id 是部署方随便起的——
+  没有静态字段名就没法"每个风格单独配提示词"。
+- **提示词三层覆盖**，也是唯一的事实来源顺序：
+
+  | 层 | 在哪配 | 说明 |
+  |---|---|---|
+  | 设置页 | 设置 → 输入优化 → 优化风格提示词 | 优先级最高；**留空**就往下落 |
+  | 组合层 | `cordis.patch.yml` 的 `presets` 里**同 id** 的那一项 | 老部署原来就写在这里，升级后行为一字不差 |
+  | 内置默认 | `lib/policy.js` | 兜底，永远可用 |
+
+- **拼装顺序固定**：基础提示词 → 选中的风格（按**清单顺序**，不是点击顺序）→ 预设（收尾）。
+  固定顺序是为了"同一组选择无论怎么点出来，system prompt 都逐字节相同"。
+
+  ```
+  BASE
+  本次额外要求（精简）：在保留全部约束的前提下压缩篇幅，去掉客套与重复表述。
+  本次额外要求（转规格）：改写为条目式需求，包含背景、目标、约束与验收标准。
+  ```
+
+- **勾选不落盘**：勾选是"这一次想怎么改写"的即时选择；需要持久化的是"每个风格的提示词是什么"。
+- **提示词正文不下发**：`/catalog` 只给风格的 `id`/`label`/**生效来源**，
+  正文留在宿主（与 `presets` 同一条规矩）。设置页里那几栏显示的是**用户自己填的值**，
+  空着时按来源标签告诉你当前用的是哪一层。
+- **未知风格 400**（`unknown-style`）：静默忽略会让用户以为风格生效了。
+- **兼容**：一个都不勾时请求体里**没有** `styleIds` 字段，响应体里也没有——
+  老客户端 + 新宿主、新客户端 + 老宿主两个方向都照常工作。
+
+## 打开插件配置文件（P6.3）
+
+设置页底部有「打开插件配置文件」，一键用编辑器打开本插件的组合层配置 `cordis.patch.yml`
+（就是 `package.json` 里 `dsh.bundle.patch` 声明的那个文件）。
+
+- **路径由宿主解析**，不是前端拼的：`lib/index.js` 用自己的模块位置推出包根
+  （`link:` 安装指向仓库、正式安装指向 profile 的 `node_modules`）。设置页同时把绝对路径
+  显示出来，方便手动打开或复制。
+- **为什么不是简单的"交给系统默认关联"**：`.yml` 在不少 Windows 机器上**根本没有关联**
+  （本机实测 `assoc .yml` → `File association not found`），此时 `explorer.exe <file>`
+  只会弹一个「你要如何打开这个文件？」——按钮就变成"点了没反应"。所以给了一条**必然可用**的候选链：
+
+  | 平台 | 候选（按顺序试，起不来就落到下一个） |
+  |---|---|
+  | Windows | `Code.exe`（VS Code 的常见安装位置）→ `notepad.exe`（系统自带，保证可用） |
+  | macOS | `open -t`（`-t` = 强制用默认**文本**编辑器） |
+  | Linux | `xdg-open` |
+
+  Windows 上刻意不用 PATH 上的 `code`：那是 `code.cmd`，Node 从 18.20/20.12 起禁止在不开
+  shell 的情况下 spawn `.cmd`（EINVAL），而开 shell 又要把路径交给 cmd 解析（引号/`&` 都是坑）。
+- **这是一条能力路由**（会在宿主上起进程），准入条件与 `/optimize` 同级：**必须有浏览器会话**，
+  不能靠本机任意进程触发。
+- **失败都有明确提示**，且都带上可直接照做的绝对路径：文件不在（404 `config-missing`）、
+  平台不支持（501 `open-unsupported`）、全都起不来（500 `open-failed`，附每个候选的错误）。
+  前端只负责显示提示，不做任何静默失败。
+- 真机验收（会真的打开文件）：
+
+  ```powershell
+  node .perf/verify-open-config.mjs
+  # status=200 body={"ok":true,"path":"...\\cordis.patch.yml","openedWith":"...\\Code.exe"}
+  ```
+
 ## 设置页（设置 → 输入优化）
 
 设置面板左侧导航里多一项「输入优化」，用来配置这个按钮**用哪个模型、哪段提示词**。
@@ -221,9 +302,10 @@ node test\settings-activation.mjs # 真框架集成 3 例：真实 cordis + 真�
 | 区域 | 能配什么 | 说明 |
 |---|---|---|
 | 提示词 | 「使用自定义提示词」开关 + 提示词正文 | 开关关闭时用插件配置的 `systemPrompt`，再往下才是内置文案 |
+| 优化风格提示词 | 「精简」「转规格」各一个输入框 | **每个风格单独配**；留空则回落到 `cordis.patch.yml` 里同 id 的预设、再往下是内置默认。旁边标出当前生效来源。勾哪些风格是每次优化时在输入框下拉框里选的，不在这里保存 |
 | 模型 | Provider + 模型名称 | 两个输入框都带候选（datalist）：目录来自宿主已注册的适配器；目录为空或想用未列出的模型时**直接手填**。旁边有「测试」按钮，走宿主 `resolveModelInfo` 只做解析校验，不发真实请求、不产生费用 |
 | 调用参数 | Temperature、输出 token 上限、超时（毫秒） | 留空 = 用适配器/组合配置/内置默认 |
-| 操作 | 保存 / 测试 / 恢复默认 | 「恢复默认」清空本页所有用户设置，回到内置默认与组合配置 |
+| 操作 | 保存 / 测试 / 恢复默认 / 打开插件配置文件 | 「恢复默认」清空本页所有用户设置（含逐风格提示词）；「打开插件配置文件」见上节 |
 
 **生效优先级**：内置默认 ← `cordis.patch.yml` 的 `config`（组合层）← 设置页（用户层）。
 设置页保存后**下一次优化即生效**（宿主每次请求现读解析后的配置），不需要重启或刷新。
@@ -263,7 +345,8 @@ node test\settings-activation.mjs # 真框架集成 3 例：真实 cordis + 真�
 | `enabled` | `true` | 总开关；`false` 时不挂路由 |
 | `systemPrompt` | 内置（见 `lib/policy.js`） | **默认**提示词；设置页启用自定义提示词时被覆盖 |
 | `model.provider` / `model.model` | 省略 | 固定模型路由；**必须成对出现**。被设置页覆盖；都没配时用宿主当前默认选择 |
-| `presets[].{id,label,prompt}` | `[]` | 预设；请求带 `presetId` 时其 `prompt` 追加到 system。`id`/`label` 会经 `/catalog` 下发到输入框旁的 `▾` 菜单（`prompt` 不下发） |
+| `presets[].{id,label,prompt}` | `[]` | 预设；请求带 `presetId` 时其 `prompt` 追加到 system。`id`/`label` 会经 `/catalog` 下发到输入框旁的 `▾` 菜单（`prompt` 不下发）。**id 命中内置优化风格**（`concise`/`spec`）时语义不同：它是那个风格的**组合层提示词**、被设置页覆盖，且会以多选勾选项出现（不再列进预设区）。见「优化风格」一节 |
+| `stylePromptConcise` / `stylePromptSpec`（**用户设置**，非本文件） | 空 | 逐风格提示词，写在设置页里；这里列出来只是说明它压过 `presets` 里同 id 的那一项 |
 | `maxInputChars` | `8000` | 输入字数上限（超限 400） |
 | `maxOutputTokens` | `1024` | 输出 token 上限，**取值域 1–200000**（截断仍返回文本并标 `truncated: true`） |
 | `timeoutMs` | `30000` | 单次调用超时，**取值域 1000–600000 ms**（超时 504） |
@@ -280,10 +363,12 @@ node test\settings-activation.mjs # 真框架集成 3 例：真实 cordis + 真�
 
 ```
 POST /api/dsh-input-optimizer/optimize
-body: { text: string, sessionId?: string, presetId?: string }
+body: { text: string, sessionId?: string, presetId?: string, styleIds?: string[] }
+      // styleIds：多选优化风格（concise / spec），去重后按**风格清单顺序**拼 system；
+      // 省略或空数组 = 不发这个字段（老客户端的行为完全不变）
 
-200 { text, modelUsed: { provider, model }, presetId?, truncated? }
-400 { error: 'bad-request' | 'empty-text' | 'text-too-long' | 'unknown-preset', message }
+200 { text, modelUsed: { provider, model }, presetId?, styleIds?, truncated? }
+400 { error: 'bad-request' | 'empty-text' | 'text-too-long' | 'unknown-preset' | 'unknown-style', message }
 401 { error: 'unauthorized', message }        // 缺浏览器会话（见下「安全」）
 403 { error: 'forbidden' }
 405 { error: 'method-not-allowed' }
@@ -299,7 +384,7 @@ body: 与 /optimize 完全相同
 状态码：准入阶段（校验/闸门/信任判定）失败时与 /optimize 完全一致；**一旦开流就只走事件**：
   : ok                                    // 注释帧：流已开（立即 flush）
   event: delta  data: { text }            // 文本增量（只发 text-delta，不发 reasoning）
-  event: done   data: { text, modelUsed, presetId?, truncated? }
+  event: done   data: { text, modelUsed, presetId?, styleIds?, truncated? }
                                           // text 是装配后的权威文本，客户端以它为准
   event: error  data: { error, message }  // 'model-failed' | 'timeout' | 其它请求级错误码
 
@@ -309,6 +394,8 @@ GET  /api/dsh-input-optimizer/catalog
       providers: [{id,name}],
       limits: { maxInputChars, temperature:{min,max}, maxOutputTokens:{min,max}, timeoutMs:{min,max} },
       presets: [{id,label}],                  // prompt 不下发；客户端不再自己维护规则镜像
+      styles: [{id,label,source}],            // 内置优化风格；prompt 同样不下发
+      configPath,                             // 插件配置文件绝对路径（给「打开配置文件」用）
       effective: { provider, model, temperature, maxOutputTokens, timeoutMs,
                    sources: { prompt, model, temperature, limits } } }
 
@@ -323,6 +410,16 @@ body: { provider: string, model: string }
     // context 取自 LlmResolvedModelInfo.context.contextWindow（该字段是对象，不是数字）
 200 { ok: false, provider, model, message }  // 解析不了的原因（不发真实请求、不计费）
 400 { error: 'missing-model', message }
+
+POST /api/dsh-input-optimizer/open-config     // 用编辑器打开插件配置文件（会在宿主上起进程）
+body: 无
+200 { ok: true, path, openedWith }           // path 是绝对路径，openedWith 是实际用的编辑器
+401 { error: 'unauthorized', message }       // 能力路由：必须有浏览器会话
+403 { error: 'forbidden' }
+404 { error: 'config-missing', message }     // 配置文件不在（附绝对路径）
+405 { error: 'method-not-allowed' }
+500 { error: 'open-failed', message }        // 候选编辑器全都起不来（附各候选的错误与路径）
+501 { error: 'open-unsupported', message }   // 未知平台（附绝对路径，让用户手动打开）
 ```
 
 安全（P5.4 起）：信任判定**优先交给框架**——`ctx.connection.requestRejection(request)` 给出
@@ -334,7 +431,8 @@ body: { provider: string, model: string }
 
 | 路由 | 是否要求浏览器会话 | 原因 |
 |---|---|---|
-| `POST /optimize` | **是** | 会消耗模型凭据；而凭据可能来自**环境变量**（`apiKeyEnv`），本机其它进程读不到它，却能借这条路由花掉它 |
+| `POST /optimize`、`POST /optimize/stream` | **是** | 会消耗模型凭据；而凭据可能来自**环境变量**（`apiKeyEnv`），本机其它进程读不到它，却能借这条路由花掉它 |
+| `POST /open-config` | **是** | 会在宿主上起进程（编辑器）；本机任意进程都不该能触发 |
 | `GET /catalog`、`GET /catalog/models`、`POST /check` | 否（仅环回） | 只暴露 provider/模型名与本插件配置，不花凭据；保留"命令行就能排查"的能力 |
 
 浏览器侧无需做任何事：会话 cookie 由 `dsh web` 打印的带 token 的 URL 换取，页面内同源 `fetch`
@@ -364,11 +462,12 @@ npm run link-deps  # 手动补 dev 依赖链接（pretest 会自动跑）
 | 检查 | 覆盖什么 | 覆盖不到什么 |
 |---|---|---|
 | **Biome lint** | 未使用变量/导入、可选链、赋值混进表达式、等宽比较等 | 不做类型检查（Biome 不是类型检查器） |
-| **约定守卫**（`scripts/check-guards.mjs`） | 11 条规则，逐条对应真实事故：`ctx.get('logger')`、设置注册一次性读、样式未打 `data-plugin`、保存未自查、并发闸门占位/释放、客户端自带宿主区间常量、SSE 分帧与流式回退、新套件没接进 `npm test` | 只认字面写法，不理解语义（所以规则要写"为什么"） |
-| **宿主半冒烟**（49 例） | 配置校验、信任判定三分支、五路由全链路、SSE 分帧与断流、注册时机、并发闸门、日志与错误码 | 不碰真实 LLM（`ctx.llm.stream` 是替身） |
-| **浏览器半冒烟**（48 例） | 座位注册、组件契约、接线与 CAS、**流式回填（节流/中止/还原/回退）**、预设菜单、撤销栈、设置页 | 用**手写 React 替身**：hook 语义是简化的 |
+| **约定守卫**（`scripts/check-guards.mjs`） | 18 条规则，逐条对应真实事故：`ctx.get('logger')`、设置注册一次性读、样式未打 `data-plugin`、保存未自查、并发闸门占位/释放、**闸门占位必须排在会抛的校验之后**、客户端自带宿主区间常量、SSE 分帧与流式回退、风格 id 校验、风格提示词不得下发、打开配置文件的路径与准入、新套件没接进 `npm test` | 只认字面写法，不理解语义（所以规则要写"为什么"） |
+| **宿主半冒烟**（59 例） | 配置校验、信任判定三分支、六路由全链路、SSE 分帧与断流、注册时机、并发闸门（含**失败后名额必须归还**的回归）、多选风格与提示词分层、catalog 不下发提示词正文、打开配置文件的候选链 | 不碰真实 LLM（`ctx.llm.stream` 是替身）；不起真实进程 |
+| **浏览器半冒烟**（60 例） | 座位注册、组件契约、接线与 CAS、流式回填（节流/中止/还原/回退）、多选风格勾选与请求体、菜单关闭手势（点内部不收起）、逐风格提示词表单与保存、打开配置文件按钮、撤销栈、设置页 | 用**手写 React 替身**：hook 语义是简化的（但 `document` 监听器是真的登记表，否则"点内部不收起"这条测不出来） |
 | **真 React 渲染**（6 例） | 用真 `react`/`react-dom` 走 SSR 真渲染路径，并把渲染期 `console.error`（React 的警告通道）当失败 | SSR 不跑 effect、也没有 DOM：拉目录/订阅/点击/菜单开合不在范围 |
-| **真框架集成**（3 例） | 真 cordis + 真 `dsh-settings-file`：提供者先到/后到/缺失三种时序，以及"注册后写得进 `settings.yaml`" | 不启真实 webserver（路由用替身捕获） |
+| **真框架集成**（4 例） | 真 cordis + 真 `dsh-settings-file`：提供者先到/后到/缺失三种时序、"注册后写得进 `settings.yaml`"，以及**逐风格提示词的全链路**（写入 → 落盘 → 生效来源变 `settings` → 下一次请求的 system 真的用它） | 不启真实 webserver、不调真实 LLM（两者都用替身捕获） |
+| **启动耗时基准**（`.perf/`） | `dsh web` 冷启动墙钟时间、插件边际成本、阶段归因；交替 A/B 消抖动 | 不起真实 GUI（`--port 0 --no-open`，不影响正在跑的实例） |
 
 **为什么只 lint 不 format**：既有代码的排版是刻意的（CSS 片段逐条成行、测试里成组的紧凑断言、JSDoc 分组），
 批量重排会产生上千行纯格式 diff，让 review 失去信号。需要时可对单个文件跑 `npm run format`。
@@ -390,9 +489,10 @@ CI 里的 react/react-dom 是 18.3.1，而本机那对是 19.2.8——真 React 
 
 按 ROI 排序：
 
-1. **P5.6 流式回填**：把 `POST /optimize` 改成分块/SSE，边生成边显示（webserver 的 gzip filter 已对 `text/event-stream` 放行）。
-2. **P5.7b typecheck**：见上（需要有网环境先装 tsc）。
-3. **P5.7c vitest + jsdom**：把浏览器半那套手写 React 替身换成真 React + DOM 环境（现在只覆盖了渲染契约，
+1. **P5.7b typecheck**：见上（需要有网环境先装 tsc）。
+2. **P5.7c vitest + jsdom**：把浏览器半那套手写 React 替身换成真 React + DOM 环境（现在只覆盖了渲染契约，
    effect/点击/菜单开合仍由替身语义兜着）。不是必须——真 React SSR 套件已经补住了"组件是否合法"这一层。
-4. **P5.8 芯片保留**：草稿含 `@引用` 时目前直接拒绝（整体 `setDraft` 会拉平芯片），后续可研究用 `insertReference` 重建。
-5. **可选**：把 `presets` 也搬进设置页（现在只能改 `cordis.patch.yml`，改完要重启）；给宿主日志加文件落盘（`dsh web` 只写 stdout，事故复盘只能用 API 反推）。
+3. **P5.8 芯片保留**：草稿含 `@引用` 时目前直接拒绝（整体 `setDraft` 会拉平芯片），后续可研究用 `insertReference` 重建。
+4. **启动耗时**：`.perf/` 那套基准可以随时复跑；目前只有一次 29.7 s 的启动**未能复现**（见 `.perf/README.md` 第 5 节），若要坐实需要在慢启动现场抓 profile。
+5. **可选**：把 `presets` 的**增删**也搬进设置页（现在只能在 `cordis.patch.yml` 里加/删预设，改完要重启；
+   逐风格提示词已经可以在设置页改并即时生效）；给宿主日志加文件落盘（`dsh web` 只写 stdout，事故复盘只能用 API 反推）。
