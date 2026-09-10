@@ -32,6 +32,7 @@
         # temperature: 0.3
         # maxOutputTokens: 1024
         # timeoutMs: 30000
+        # maxInputChars: 8000
         # 可选：预设（请求带 presetId 时把对应 prompt 追加到 system）
         presets:
           - id: concise

@@ -28,19 +28,34 @@
       "inject": [
         "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-renderer",
-        "@deepseek-ai/dsh-client-ui-conversation"
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-settings"
       ]
     }
   },
   "files": [
     "lib",
+    "scripts",
+    "test",
     "cordis.patch.yml",
     "README.md"
   ],
   "scripts": {
+    "link-deps": "node scripts/link-dev-deps.mjs",
+    "pretest": "node scripts/link-dev-deps.mjs",
     "test": "node test/smoke.mjs && node test/client.smoke.mjs"
   },
   "peerDependencies": {
-    "react": "^18.2.0"
+    "react": "^18.2.0",
+    "@deepseek-ai/dsh-llm": ">=0.1.2-rc.1",
+    "@deepseek-ai/schemastery": ">=3"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
   }
 }
