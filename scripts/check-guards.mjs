@@ -76,6 +76,22 @@ const checks = [
     file: 'lib/index.js',
     must: /slot\?\.release\?\.\(\)/,
   },
+  {
+    why: '流式路由必须按 SSE 协议分帧并挂上（客户端默认走它；少了 openEventStream 就不是流式，'
+      + '少了 ROUTE_STREAM 客户端会一直回退——功能悄悄降级没人发现）',
+    file: 'lib/index.js',
+    must: /openEventStream\(/,
+  },
+  {
+    why: '流式路由必须注册进路由表',
+    file: 'lib/index.js',
+    must: /ROUTE_STREAM/,
+  },
+  {
+    why: '流式不可用时客户端必须能回退到一次性 JSON：流式是增强，不能变成新的失败面',
+    file: 'lib/client.js',
+    must: /unavailable: true/,
+  },
 ]
 
 /** 客户端不许出现"与宿主同值"的区间字面量（只允许兜底常量里出现）。 */
