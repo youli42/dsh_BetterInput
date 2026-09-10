@@ -35,7 +35,7 @@
 | `lib/client.js` | 浏览器半：输入框按钮 + CAS + 撤销栈 + **设置页**（手写 bundle，无构建步骤） |
 | `lib/types/*.d.ts` | 对外契约类型（含组件行为契约、设置段字段） |
 | `scripts/link-dev-deps.mjs` | 把宿主的 `@deepseek-ai/*` 软链进本仓库（`pretest` 自动跑；`link:` 安装的运行时同样必需） |
-| `test/smoke.mjs`（42 例）、`test/client.smoke.mjs`（42 例）、`test/settings-activation.mjs`（3 例） | 共 87 例，全绿（`npm test`） |
+| `test/smoke.mjs`（42 例）、`test/client.smoke.mjs`（42 例）、`test/client.react.mjs`（6 例）、`test/settings-activation.mjs`（3 例） | 共 93 例，全绿；外加 8 条约定守卫与 Biome lint（`npm run verify`） |
 
 **验收证据**：P0 曾在 Web GUI 目视确认（2026-09-10，当时用 `link:D:\SSDWP\AI\dsh\BetterInput` 装入 profile）。
 2026-09-11 复核时发现该路径已不存在、profile 里也没有本插件（bundles 无条目、patch 为空、`node_modules` 无包），
@@ -198,6 +198,37 @@ P1 的路由此后仍需在真机上 curl 一次（单测用假 LLM 流覆盖了
     有专门用例守着——否则几次取消之后插件就"锁死"了）。
     剩余：没有做速率限制（令牌桶）。当前策略挡住的是"并发刷"这一最直接的花钱方式，
     单个脚本仍可串行高频调用；真要挡需要按用户/时间窗计量，属于产品策略而非技术缺口。
+
+### P5.7（工程化，2026-09-11）
+
+30. **先做"能在本机真实验证"的四件事**，而不是把**跑不起来**的配置提交上去充数：
+    · **Biome lint**（`biome.json` + `scripts/lint.mjs`）：零依赖包装脚本会在"仓库内 devDependencies →
+       全局安装 → PATH"三处找 Biome，所以本机（只有全局）与 CI（devDependencies）都能跑。
+       规则集在 recommended 上关掉了 `useNamingConvention`/`useLiteralKeys` 等噪声项，
+       并对 `scripts/**`、`test/**` 放开 `noConsole`（它们本来就靠 stdout 报告）。当前**零发现**。
+    · **约定守卫**（`scripts/check-guards.mjs`）：把最近两轮踩过的坑写成 8 条可自动检查的规则，
+       每条都注明"防的是哪一次事故"：`ctx.get('logger')`、`settings` 一次性读、样式未打 `data-plugin`、
+       保存未写后自查、并发闸门占位/释放、客户端自带宿主区间常量、以及"新套件没接进 `npm test`"。
+       它的价值在于**覆盖单测覆盖不到的一类缺陷**：契约误判往往能被"源码里不许出现某写法"精确表达。
+    · **真 React 渲染测试**（`test/client.react.mjs`）：用真 `react`/`react-dom` 走 SSR 真渲染路径，
+       并把渲染期 `console.error`（React 的警告通道）当失败。这补上了"手写 React 替身测不出组件是否合法"
+       那一层。**覆盖边界写进了文件头**：SSR 不跑 effect、也没有 DOM，所以拉目录/订阅/点击/菜单开合仍由
+       替身套件负责——不夸大覆盖面。React 版本这里有个坑：dsh 安装里 hoisted `react` 是 18、
+       而 `react-dom` 只存在于某个包的嵌套目录（同级 `react` 19）——两者混用会直接抛
+       "Incompatible React versions"，所以软链脚本**按配对解析**（以 `react-dom` 的同级 `react` 为准）。
+    · **CI**（`.github/workflows/ci.yml`）：Windows 上跑 lint + 约定守卫 + 四个套件；宿主依赖从 registry 装
+       （CI 里没有 dsh 安装 → `link-dev-deps` 检测到"已可从仓库解析"就安静跳过）。
+       CI 的 react 是 18.3.1、本机那对是 19.2.8，于是真 React 套件**顺带覆盖两个大版本**。
+31. **刻意没做的两件**（写在这里以免被当成遗漏）：
+    · **typecheck（`tsconfig.json` + `checkJs`）**：这是对症的方向（本轮多个缺陷是类型/契约判错），
+       但本机没有 tsc、也没有网络可装（TypeScript 不在 dsh 安装里，registry 不可达）。
+       提交一份**没跑过**的 tsconfig + 一堆未校准的 JSDoc 类型，只会让 CI 首跑就红——
+       那是负价值。补法（半天，需要有网环境）已写进 README「工程化」：装 typescript →
+       给宿主 ctx 写最小 typedef（正是 `ctx.llm.resolveModelInfo().context` 这类误判的抓手）→
+       校准首批 JSDoc → 接进 CI。
+    · **vitest + jsdom 迁移**：真 React SSR 套件已经把"组件是否合法 / 有没有 React 警告"这一层补上了，
+       剩下的收益（effect、点击、菜单开合用真 DOM 跑）不足以支撑把 84 例冒烟测试整体重写一遍的风险，
+       因此降级为可选（P5.7c）。
 
 ---
 
@@ -658,7 +689,8 @@ window.__ModuleLoader__.load({
 | **P5.3** 预设菜单 | 输入框旁 `▾` 菜单，选中即带 `presetId` | ✅ 已实现（2026-09-11；见 §0.5 第 27 条） |
 | **P5.4** 信任判定收敛 | 改走 `ctx.connection.requestRejection()`；能力路由要求浏览器会话 | ✅ 已实现（2026-09-11；见 §0.5 第 28 条） |
 | **P5.5** 并发闸门 | 同会话单航班（409）+ 全局并发上限（429，默认 4，可配 `maxConcurrentCalls`） | ✅ 已实现（2026-09-11；见 §0.5 第 29 条） |
-| **P5.6–P5.8** 打磨 | 流式回填、工程化（typecheck/vitest/CI）、芯片保留 | ⬜ 待做（见 README「下一步」） |
+| **P5.7** 工程化 | Biome lint + 约定守卫 + 真 React 渲染测试 + CI（Windows） | ✅ 已实现（2026-09-11；见 §0.5 第 30–31 条） |
+| **P5.6 / 5.7b / 5.7c / 5.8** | 流式回填、typecheck（需有网环境）、vitest+jsdom、芯片保留 | ⬜ 待做（见 README「下一步」） |
 
 ---
 
@@ -688,6 +720,9 @@ window.__ModuleLoader__.load({
 | R-20 | **激活顺序竞态**：`ctx.get(name)` 是 `strict = true`，对"已 provide 但未 ACTIVE"的服务返回 `undefined`；而 `SettingsProvider` 要 `await load()` 之后才 ACTIVE | 在 `apply()` 里一次性读设置服务 → 竞态落败就**永久**降级，设置页恒显示「设置服务不可用」（重启也一样，除非启动顺序恰好变好） | 一切"可选服务"都用 `ctx.inject([name], cb)` 挂载（服务就绪即执行、卸载即回收），不要用 `ctx.get` 做一次性判定；用真实框架跑集成测试钉住时机（`test/settings-activation.mjs`） |
 | R-21 | 能力路由若只靠 socket 环回判定，则**本机其它进程**可借它花掉用户的模型凭据（凭据来自 `apiKeyEnv` 时本机进程读不到它，却能用它） | 未授权消耗额度 | 能力路由（`/optimize`）要求浏览器会话（框架 `requestRejection` 的 401）；元数据路由保留环回免会话以便命令行排查。见 §0.5 第 28 条 |
 | R-22 | 并发/速率限制：多标签页或本机脚本可并发刷 `optimize` | 短时间内重复烧 token | ✅ P5.5 已收敛并发部分：同会话单航班 + 全局上限（默认 4）；**速率限制（令牌桶）仍未做**，属产品策略 |
+| R-23 | **没有 typecheck**：本机无 tsc、无网络可装，只能靠单测 + 约定守卫兜类型/契约判错 | 同类缺陷（如 `info.context` 判型错）仍可能漏到真机 | P5.7b 待做（步骤见 README「工程化」）；当前以"约定守卫"覆盖已发现的判错模式 |
+| R-24 | 真 React 套件跑 SSR：**不执行 effect**，也不覆盖点击/菜单开合 | hook 依赖数组、订阅清理这类问题仍只能靠替身套件（语义是简化的）保护 | 目标明确写在 `test/client.react.mjs` 文件头；P5.7c（vitest+jsdom）可选补齐 |
+| R-25 | CI 的宿主依赖版本写死（`@deepseek-ai/*@0.1.2-rc.1`） | dsh 升级后 CI 可能装不上或与本地版本不一致 | dsh 升级时同步 `.github/workflows/ci.yml` 里的版本与 README 记录 |
 
 ---
 
@@ -724,4 +759,4 @@ P0 期曾把「最小可跑骨架」抄在这里，但骨架会与真实代码�
 | 行为与接口契约（含撤销/取消语义、mutate 的失败语义） | [`lib/types/client/index.d.ts`](./lib/types/client/index.d.ts) |
 | 宿主契约与错误码清单 | [`lib/types/index.d.ts`](./lib/types/index.d.ts) |
 | 开发/`link:` 安装所需的依赖软链 | [`scripts/link-dev-deps.mjs`](./scripts/link-dev-deps.mjs)、[`scripts/dsh-packages.mjs`](./scripts/dsh-packages.mjs) |
-| 可执行的行为说明（42 + 42 + 3 = 87 例） | [`test/smoke.mjs`](./test/smoke.mjs)、[`test/client.smoke.mjs`](./test/client.smoke.mjs)、[`test/settings-activation.mjs`](./test/settings-activation.mjs) |
+| 可执行的行为说明（42 + 42 + 6 + 3 = 93 例）+ 约定守卫 | [`test/smoke.mjs`](./test/smoke.mjs)、[`test/client.smoke.mjs`](./test/client.smoke.mjs)、[`test/settings-activation.mjs`](./test/settings-activation.mjs) |

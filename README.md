@@ -20,10 +20,11 @@ DSH Web GUI 插件：在**模型选择器左侧**加一个「AI 优化输入」�
 | P5.3 | 预设菜单：输入框旁 ▾ 菜单，选中后请求带 `presetId` | ✅ 已实现（2026-09-11） |
 | P5.4 | 信任判定改走框架 `ctx.connection.requestRejection()`（能力路由要浏览器会话） | ✅ 已实现（2026-09-11） |
 | P5.5 | 并发闸门：同会话单航班（409）+ 全局并发上限（429） | ✅ 已实现（2026-09-11） |
-| P5.6–P5.8 | 流式回填、工程化、芯片保留 | ⬜ 待做（见「下一步」） |
+| P5.7 | 工程化：Biome lint、约定守卫、真 React 渲染测试、CI | ✅ 已实现（2026-09-11） |
+| P5.6 / P5.7b / P5.7c / P5.8 | 流式回填、typecheck（缺 tsc）、vitest+jsdom、芯片保留 | ⬜ 待做（见「下一步」与「工程化」） |
 
-测试：宿主半 42 例 + 浏览器半 42 例 + 真框架集成 3 例，全绿
-（`npm test`，会先自动补齐 dev 依赖链接）。
+检查：lint 零发现 · 约定守卫 8 条 · 测试 42 + 42 + 6 + 3 = 93 例，全绿
+（`npm run verify` = lint + 全部检查；`npm test` 会先自动补齐 dev 依赖链接）。
 
 > **运行前提**：仓库里没有 `node_modules` 时，`npm test` 与 `link:` 方式安装后的运行时都跑不起来
 > （原因与自动修法见「开发循环」）。
@@ -32,17 +33,22 @@ DSH Web GUI 插件：在**模型选择器左侧**加一个「AI 优化输入」�
 
 ```
 package.json          双半声明：main(lib/index.js) + exports["./client"] + dsh.client/bundle
+biome.json            lint 配置（只 lint 不 format，见「工程化」）
 cordis.patch.yml      bundle patch + 组合层配置（设置页的用户值优先于它）
-lib/index.js          宿主半：4 条路由 + LLM 一次性调用
-lib/settings.js       宿主半：设置命名空间 schema 与跨字段校验
+lib/index.js          宿主半：4 条路由 + LLM 一次性调用 + 并发闸门
+lib/settings.js       宿主半：设置命名空间 schema 与跨字段校验（注册挂在 settings 就绪时）
 lib/policy.js         策略层：零依赖，配置校验/信任围栏/生效配置解析（可独立单测）
-lib/client.js         浏览器半：输入框按钮 + 预设菜单 + 撤销栈 + 设置页（手写 __ModuleLoader__ bundle，无需构建）
+lib/client.js         浏览器半：输入框按钮 + 预设菜单 + 撤销栈 + 设置页（手写 __ModuleLoader__ bundle）
 lib/types/*.d.ts      对外类型
-scripts/dsh-packages.mjs  定位 dsh 安装与其中的宿主包（脚本与集成测试共用）
-scripts/link-dev-deps.mjs 把宿主的 @deepseek-ai/* 软链进本仓库（`npm test` 前自动跑）
+scripts/check-guards.mjs  约定守卫：把踩过的坑变成可自动检查的规则
+scripts/dsh-packages.mjs  定位 dsh 安装与其中的宿主包（脚本与测试共用）
+scripts/link-dev-deps.mjs 把宿主依赖软链进本仓库（`npm test` 前自动跑；CI 里自动跳过）
+scripts/lint.mjs      找 Biome 并跑 lint（仓库内 / 全局安装都能用）
 test/smoke.mjs        宿主半冒烟测试（42 例）
 test/client.smoke.mjs 浏览器半冒烟测试（42 例：接线、预设菜单、宿主下发规则、撤销栈、设置页）
-test/settings-activation.mjs 真框架集成测试（3 例：用真实 cordis + 真实 settings 提供者钉住注册时机）
+test/client.react.mjs 真 React 渲染测试（6 例：真 react/react-dom SSR，含"不得有 React 警告"）
+test/settings-activation.mjs 真框架集成测试（3 例：真实 cordis + 真实 settings 提供者）
+.github/workflows/ci.yml  CI：lint + 约定守卫 + 四个套件（Windows）
 DESIGN.md             设计依据：座位/接口证据、撤销方案、提示词分层、风险清单
 LICENSE               MIT
 ```
@@ -142,20 +148,23 @@ curl.exe -s -X POST http://127.0.0.1:3080/api/dsh-input-optimizer/check `
 # Application → Cookies 里那条 dsh 会话 cookie 用 `-b "<name>=<value>"` 带上。
 ```
 
-6. **测试**：
+6. **检查**：
 
 ```powershell
-npm test                          # 先自动补 dev 依赖链接，再跑三个套件
+npm run verify                    # lint + 约定守卫 + 四个套件（推荐）
+npm test                          # 约定守卫 + 宿主半 + 浏览器半 + 真 React + 真框架集成
 node test\smoke.mjs               # 宿主半 42 例：生效配置、信任判定、并发闸门、四路由全链路、注册时机
 node test\client.smoke.mjs        # 浏览器半 42 例：座位、预设菜单、宿主下发规则、撤销栈、设置页
+node test\client.react.mjs        # 真 React 6 例：真 react/react-dom SSR 渲染（含"不得有 React 警告"）
 node test\settings-activation.mjs # 真框架集成 3 例：真实 cordis + 真实 settings 提供者，钉住注册时机
 ```
 
+> 各项检查覆盖什么/不覆盖什么、以及 typecheck 为何还没上，见「工程化」一节。
 > 宿主半测试与运行时都需要 `@deepseek-ai/dsh-llm`（设置半还需要 `@deepseek-ai/schemastery`）可见；
-> 集成测试还需要 `@deepseek-ai/cordis`、`@deepseek-ai/dsh-settings-file`。
-> `npm test` 的 `pretest` 会自动建这些软链（`npm run link-deps`）；脚本会在
-> `$DSH_HOME/profiles`、`~/.dsh/profiles`、nvm 安装目录里找 dsh，找不到才报错。
-> 也可用 `$env:DSH_INSTALL_ANCHOR` 显式指定含 `node_modules` 的目录。
+> 集成测试还需要 `@deepseek-ai/cordis`、`@deepseek-ai/dsh-settings-file`；真 React 套件需要配对好的
+> `react`/`react-dom`。`npm test` 的 `pretest` 会自动建这些软链（`npm run link-deps`）；
+> 脚本会在 `$DSH_HOME/profiles`、`~/.dsh/profiles`、nvm 安装目录里找 dsh，找不到才报错
+> （也可用 `$env:DSH_INSTALL_ANCHOR` 显式指定含 `node_modules` 的目录）。
 
 ## 行为说明（已实现）
 
@@ -311,11 +320,48 @@ body: { provider: string, model: string }
 - 每次改完先 `npm test`，再动 GUI。
 - 宿主半要打印日志必须用 `ctx.logger`（**不是** `ctx.get('logger')`：logger 不是 reflect 注册的服务，后者恒为 `undefined`，会让所有日志静默丢失）；参数按 printf 风格传。
 
+## 工程化
+
+```powershell
+npm run verify     # 一条命令跑完全部检查：lint → 约定守卫 → 四个套件
+npm run lint       # Biome lint（只 lint，不 format，理由见下）
+npm run guards     # 约定守卫：把踩过的坑变成可自动检查的规则
+npm test           # 约定守卫 + 宿主半 + 浏览器半 + 真 React + 真框架集成
+npm run link-deps  # 手动补 dev 依赖链接（pretest 会自动跑）
+```
+
+| 检查 | 覆盖什么 | 覆盖不到什么 |
+|---|---|---|
+| **Biome lint** | 未使用变量/导入、可选链、赋值混进表达式、等宽比较等 | 不做类型检查（Biome 不是类型检查器） |
+| **约定守卫**（`scripts/check-guards.mjs`） | 8 条规则，逐条对应真实事故：`ctx.get('logger')`、设置注册一次性读、样式未打 `data-plugin`、保存未自查、并发闸门占位/释放、客户端自带宿主区间常量、新套件没接进 `npm test` | 只认字面写法，不理解语义（所以规则要写"为什么"） |
+| **宿主半冒烟**（42 例） | 配置校验、信任判定三分支、四路由全链路、注册时机、并发闸门、日志与错误码 | 不碰真实 LLM（`ctx.llm.stream` 是替身） |
+| **浏览器半冒烟**（42 例） | 座位注册、组件契约、接线与 CAS、预设菜单、撤销栈、设置页（含"保存未生效"） | 用**手写 React 替身**：hook 语义是简化的 |
+| **真 React 渲染**（6 例） | 用真 `react`/`react-dom` 走 SSR 真渲染路径，并把渲染期 `console.error`（React 的警告通道）当失败 | SSR 不跑 effect、也没有 DOM：拉目录/订阅/点击/菜单开合不在范围 |
+| **真框架集成**（3 例） | 真 cordis + 真 `dsh-settings-file`：提供者先到/后到/缺失三种时序，以及"注册后写得进 `settings.yaml`" | 不启真实 webserver（路由用替身捕获） |
+
+**为什么只 lint 不 format**：既有代码的排版是刻意的（CSS 片段逐条成行、测试里成组的紧凑断言、JSDoc 分组），
+批量重排会产生上千行纯格式 diff，让 review 失去信号。需要时可对单个文件跑 `npm run format`。
+
+**CI**（`.github/workflows/ci.yml`）：Windows 上跑 lint + 约定守卫 + 四个套件，宿主依赖从 registry 装
+（CI 里没有 dsh 安装，`link-dev-deps` 会检测到"依赖已可从仓库解析"而安静跳过）。
+CI 里的 react/react-dom 是 18.3.1，而本机那对是 19.2.8——真 React 套件因此**同时覆盖两个大版本**。
+
+**typecheck 为何还没上（P5.7b）**：`tsconfig.json` + `checkJs` 是对症的（最近两轮多个缺陷是"类型判错/契约判错"），
+但本机**既没有 tsc 也没有网络**可以安装（TypeScript 不在 dsh 安装里，registry 不可达），
+所以这一轮**不提交未校准的配置**——那只会让 CI 首跑即红。补法（需要有网的环境，约半天）：
+1. `npm i -D typescript`，加 `tsconfig.json`（`allowJs`+`checkJs`+`noEmit`，`strict: false` 起步）；
+2. 给宿主 ctx 写一份最小 typedef（`webServer`/`llm`/`settings`/`logger`/`connection` 的用法面），
+   再把 `@param {object} ctx` 换成它——`ctx.llm.resolveModelInfo().context` 这类误判就会被静态抓住；
+3. 首次运行会暴露一批 JSDoc 类型需要校准（预期是"手写 bundle + 无类型依赖"的必然代价），
+   校准完再把 `npm run typecheck` 接进 CI。
+
 ## 下一步
 
 按 ROI 排序：
 
 1. **P5.6 流式回填**：把 `POST /optimize` 改成分块/SSE，边生成边显示（webserver 的 gzip filter 已对 `text/event-stream` 放行）。
-2. **P5.7 工程化**：`tsconfig.json` + `checkJs` typecheck（最近两轮多个缺陷都是"类型判错/契约判错"，静态检查能提前抓住）、lint、CI、两个 smoke 套件迁 vitest（jsdom + 真 React——现在的假 React 测不出 hook 类问题）。
-3. **P5.8 芯片保留**：草稿含 `@引用` 时目前直接拒绝（整体 `setDraft` 会拉平芯片），后续可研究用 `insertReference` 重建。
-4. **可选**：把 `presets` 也搬进设置页（现在只能改 `cordis.patch.yml`，改完要重启）；给 `ctx.logger` 加文件落盘（`dsh web` 目前只写 stdout，事故复盘只能用 API 反推）。
+2. **P5.7b typecheck**：见上（需要有网环境先装 tsc）。
+3. **P5.7c vitest + jsdom**：把浏览器半那套手写 React 替身换成真 React + DOM 环境（现在只覆盖了渲染契约，
+   effect/点击/菜单开合仍由替身语义兜着）。不是必须——真 React SSR 套件已经补住了"组件是否合法"这一层。
+4. **P5.8 芯片保留**：草稿含 `@引用` 时目前直接拒绝（整体 `setDraft` 会拉平芯片），后续可研究用 `insertReference` 重建。
+5. **可选**：把 `presets` 也搬进设置页（现在只能改 `cordis.patch.yml`，改完要重启）；给宿主日志加文件落盘（`dsh web` 只写 stdout，事故复盘只能用 API 反推）。
