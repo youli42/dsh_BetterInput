@@ -39,7 +39,7 @@ function codeOnly(source) {
     .replace(/`(?:[^`\\]|\\.)*`/g, '``')
 }
 
-/** 检查项：每条都是"某个文件里不许/必须出现某个写法"。 */
+/** 检查项：每条都是"某个文件里不许/必须出现某个写法"（可选 `after` 约束先后顺序）。 */
 const checks = [
   {
     why: 'ctx.get("logger") 恒为 undefined（logger 是 root context 的自有属性，不是 reflect 服务），'
@@ -92,6 +92,46 @@ const checks = [
     file: 'lib/client.js',
     must: /unavailable: true/,
   },
+  {
+    why: '闸门的占位必须排在"会抛的校验"之后：占位后抛错（未知预设 400 / 没有模型路由 502）'
+      + '会让名额随调用栈丢失，该会话之后恒 409、累计满额后全局恒 429，只能重启宿主——'
+      + 'f4b190e 把 acquire 移进 prepareCall 时引入过这个回归',
+    file: 'lib/index.js',
+    must: /const slot = gate\.acquire\(sessionId\)/,
+    after: [/const system = systemPromptFor\(/, /const route = resolveRoute\(/],
+  },
+  {
+    why: '多选风格的 id 校验必须在宿主侧做（未知 id 静默忽略会让用户以为风格生效了）',
+    file: 'lib/index.js',
+    must: /parseStyleIds\(/,
+  },
+  {
+    why: '风格提示词正文绝不能下发到浏览器：`/catalog` 只能给 id/label/source（与 presets 同规矩）',
+    file: 'lib/index.js',
+    forbid: /styles:\s*effective\.styles\s*[,}]/,
+    must: /styles: effective\.styles\.map\(/,
+  },
+  {
+    why: '「打开配置文件」的路径必须由宿主按自己的模块位置解析，且文件名取自与 dsh.bundle.patch '
+      + '同源的常量（profile 布局随 link:/正式安装而变，前端拼不出来）',
+    file: 'lib/index.js',
+    must: /PLUGIN_CONFIG_FILENAME/,
+  },
+  {
+    why: '打开配置文件是能力路由（会在宿主上起进程）：必须要求浏览器会话，不能靠本机任意进程触发',
+    file: 'lib/index.js',
+    must: /openConfigPayload\(\)[\s\S]{0,200}?session: true/,
+  },
+  {
+    why: '打开配置文件必须真的挂进路由表（写了实现却没注册 = 按钮永远 404）',
+    file: 'lib/index.js',
+    must: /path: ROUTE_OPEN_CONFIG/,
+  },
+  {
+    why: '客户端必须把勾选的风格发出去（勾了却只发默认提示词 = 功能静默失效）',
+    file: 'lib/client.js',
+    must: /styleIds,/,
+  },
 ]
 
 /** 客户端不许出现"与宿主同值"的区间字面量（只允许兜底常量里出现）。 */
@@ -121,6 +161,22 @@ for (const check of checks) {
   }
   if (check.must !== undefined && !check.must.test(source)) {
     failures.push(`${check.file} 缺少必需的写法（${String(check.must)}）：${check.why}`)
+  }
+  // 顺序断言：`after` 里的每个写法都必须出现在 `must` **之前**。
+  // 只查"存在"是不够的——闸门泄漏那次的写法每一句都还在，错的只是先后。
+  if (check.must !== undefined && check.after !== undefined) {
+    const at = source.search(check.must)
+    if (at >= 0) {
+      for (const earlier of check.after) {
+        const before = source.search(earlier)
+        if (before < 0 || before > at) {
+          failures.push(
+            `${check.file} 里 ${String(earlier)} 必须排在 ${String(check.must)} 之前`
+              + `（现在 ${before < 0 ? '根本没出现' : '排在后面'}）：${check.why}`,
+          )
+        }
+      }
+    }
   }
 }
 
