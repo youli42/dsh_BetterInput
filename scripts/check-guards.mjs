@@ -112,6 +112,13 @@ const checks = [
     must: /styles: effective\.styles\.map\(/,
   },
   {
+    why: '追加提示词的行必须由 policy.js 的 profileRowsOf 生成（只给 id/名称）：宿主 index.js 一旦直接接触 '
+      + 'promptProfiles 字段，追加提示词正文就会混进 /catalog 响应——正文只属于用户自己的设置镜像',
+    file: 'lib/index.js',
+    forbid: /promptProfiles/,
+    must: /profileRowsOf\(/,
+  },
+  {
     why: '「打开配置文件」的路径必须由宿主按自己的模块位置解析，且文件名取自与 dsh.bundle.patch '
       + '同源的常量（profile 布局随 link:/正式安装而变，前端拼不出来）',
     file: 'lib/index.js',
@@ -128,9 +135,10 @@ const checks = [
     must: /path: ROUTE_OPEN_CONFIG/,
   },
   {
-    why: '客户端必须把勾选的风格发出去（勾了却只发默认提示词 = 功能静默失效）',
+    why: '追加提示词切换必须真的写设置（mutate 落盘 activeProfileId）：只改本地高亮不落盘，'
+      + '刷新后就回到旧追加提示词，用户以为切换成功了——P8 合并后这是追加提示词生效的唯一通道',
     file: 'lib/client.js',
-    must: /styleIds,/,
+    must: /scope\.mutate\(\[op\]/,
   },
 ]
 

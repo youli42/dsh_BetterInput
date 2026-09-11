@@ -9,7 +9,7 @@
 /** 稳定 cordis 插件名。 */
 export declare const name = 'better-input'
 
-/** 需要就绪的服务（设置服务是可选依赖，走 `ctx.get('settings')`，缺了只降级不报错）。 */
+/** 需要就绪的服务（设置是可选依赖：宿主半用 `ctx.inject(['settings'], …)` 等它就绪，缺了只降级不报错）。 */
 export declare const inject: readonly ['webServer', 'llm']
 
 /** 能力路由：优化输入内容。 */
@@ -28,17 +28,38 @@ export declare const ROUTE_OPEN_CONFIG = '/api/dsh-input-optimizer/open-config'
 /** 插件配置文件名（相对包根；与 package.json 的 `dsh.bundle.patch` 同源）。 */
 export declare const PLUGIN_CONFIG_FILENAME = 'cordis.patch.yml'
 
-/** 内置优化风格的 id（客户端可多选；提示词逐项可配）。 */
+/** 内置优化风格的 id（P8 起同时是追加提示词的内置种子 id；提示词逐项可配）。 */
 export declare const STYLE_IDS: readonly ['concise', 'spec']
+
+/**
+ * 追加提示词：一条可命名、可切换的追加内容，拼装时接在**系统提示词**之后
+ * （`系统提示词\n\n本次额外要求（名称）：正文`）。它只追加、不替换系统提示词。
+ * 内置条目（精简/转规格）的存储覆盖允许省略 name（显示名由宿主按内置标签补齐）。
+ */
+export interface PromptProfile {
+  /** 稳定 id（客户端生成；`concise`/`spec` 是内置追加提示词的保留 id = 覆盖其默认文案）。 */
+  id: string
+  /** 展示名称；内置追加提示词的覆盖条目可省略。 */
+  name?: string
+  /** 这条追加提示词的正文（绝不下发给浏览器）。 */
+  prompt: string
+}
 
 /** 用户设置命名空间：宿主注册、客户端 `settingsScope` 绑定同一个。 */
 export declare const SETTINGS_NAMESPACE = 'better-input'
 
+/** 设置段里"追加提示词列表"的字段名。 */
+export declare const PROMPT_PROFILES_FIELD = 'promptProfiles'
+/** 设置段里"当前启用条目 id"的字段名（空 = 不追加）。 */
+export declare const ACTIVE_PROFILE_FIELD = 'activeProfileId'
+/** 追加提示词数量上限。 */
+export declare const MAX_PROMPT_PROFILES = 20
+
 /** 设置段的扁平字段（与宿主 schema、客户端表单一一对应）。 */
 export interface BetterInputSettingsSection {
-  /** 是否启用自定义提示词（默认 false = 用内置/组合配置的提示词）。 */
+  /** 是否启用自定义系统提示词（默认 false = 用内置/组合配置的系统提示词）。 */
   customPromptEnabled?: boolean
-  /** 自定义 system prompt 正文。 */
+  /** 自定义 system prompt 正文（基底；追加提示词接在它之后）。 */
   systemPrompt?: string
   /** 模型 provider id（与 modelId 成对）。 */
   modelProvider?: string
@@ -50,9 +71,13 @@ export interface BetterInputSettingsSection {
   maxOutputTokens?: number
   /** 单次调用超时（毫秒）。 */
   timeoutMs?: number
-  /** 「精简」风格的独立提示词；留空 = 用组合配置同 id 的预设 / 内置默认。 */
+  /** 多条追加提示词；`activeProfileId` 指向其中之一（或内置条目 id）时它的正文会追加到系统提示词之后。 */
+  promptProfiles?: PromptProfile[]
+  /** 当前启用的追加条目 id；空串/缺省 = 不追加。 */
+  activeProfileId?: string
+  /** 「精简」风格的追加要求（遗留字段；现同时是内置追加提示词的默认文案来源之一）。 */
   stylePromptConcise?: string
-  /** 「转规格」风格的独立提示词；留空 = 用组合配置同 id 的预设 / 内置默认。 */
+  /** 「转规格」风格的追加要求（遗留字段；现同时是内置追加提示词的默认文案来源之一）。 */
   stylePromptSpec?: string
 }
 
@@ -60,7 +85,7 @@ export interface BetterInputSettingsSection {
 export interface Config {
   /** 总开关；false 时不挂路由。 @default true */
   enabled?: boolean
-  /** 默认优化提示词。 */
+  /** 默认系统提示词（组合层基底；追加提示词接在它之后）。 */
   systemPrompt?: string
   /** 固定模型路由；provider 与 model 必须成对出现。 */
   model?: { provider: string, model: string }
@@ -93,20 +118,37 @@ export declare function effectiveConfig(
   config: Readonly<object>,
   section: unknown,
 ): {
+  /** **基底**系统提示词（自定义开关 → 组合配置 → 内置默认）；追加提示词不在这一层。 */
   systemPrompt: string
+  /** 启用中的追加提示词 id（不追加时不存在）；正文在 `profiles` 里。 */
+  profileId?: string
   provider?: string
   model?: string
   temperature?: number
   maxOutputTokens: number
   timeoutMs: number
-  /** 每个风格的生效提示词与它来自哪一层（正文**不下发**给浏览器）。 */
+  /** 合并后的追加提示词清单（内置种子在前）；正文只在宿主用，catalog 行由 profileRowsOf 裁剪。 */
+  profiles: ReadonlyArray<{
+    id: string, label: string, prompt: string,
+    source: 'settings' | 'config' | 'default', builtIn: boolean,
+  }>
+  /** 每个风格的生效提示词与它来自哪一层（旧多选风格的兼容面；正文**不下发**给浏览器）。 */
   styles: ReadonlyArray<{ id: string, label: string, prompt: string, source: 'settings' | 'config' | 'default' }>
-  /** 每个值实际来自哪一层，供设置页如实标注。 */
+  /** 每个值实际来自哪一层，供设置页如实标注（`prompt` 指**基底**系统提示词的那一层）。 */
   sources: { prompt: string, model: string, temperature: string, limits: string }
 }
 
 /**
- * 校验请求体里的 `styleIds`（多选优化风格）：去重、未知 id 报 400。
+ * 生效配置 → `/catalog` 的追加提示词行：只给 id/名称/来源/是否内置，prompt 正文绝不经过这条路由。
+ * @param effective - effectiveConfig 的产物（含合并后的 profiles）。
+ */
+export declare function profileRowsOf(
+  effective: unknown,
+): Array<{ id: string, name: string, source: string, builtIn: boolean }>
+
+/**
+ * 校验请求体里的 `styleIds`（**旧客户端兼容**的多选风格字段）：去重、未知 id 报 400。
+ * 合并后新客户端不再发送它；宿主继续接受，追加语义与旧版一致。
  * @param raw - 请求体里的 styleIds。
  * @returns 校验后的风格 id 列表。
  */

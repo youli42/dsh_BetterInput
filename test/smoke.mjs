@@ -10,14 +10,18 @@ import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
 
 import {
+  ACTIVE_PROFILE_FIELD,
   MAX_BODY_BYTES,
+  MAX_PROMPT_PROFILES,
   PLUGIN_CONFIG_FILENAME,
+  PROMPT_PROFILES_FIELD,
   ROUTE,
   ROUTE_CATALOG,
   ROUTE_CATALOG_MODELS,
   ROUTE_CHECK,
   ROUTE_OPEN_CONFIG,
   ROUTE_STREAM,
+  SETTINGS_FIELD_KEYS,
   SETTINGS_NAMESPACE,
   STYLE_IDS,
   effectiveConfig,
@@ -26,6 +30,7 @@ import {
   isLoopbackRequest,
   openerCandidates,
   parseStyleIds,
+  profileRowsOf,
   resolveConfig,
   systemPromptFor,
   validateSettingsSection,
@@ -906,6 +911,182 @@ await test('跨字段校验规则矩阵（宿主与客户端共用结论）', ()
   assert.equal(validateSettingsSection({ systemPrompt: 5 }).length, 1)
 })
 
+console.log('settings: 追加提示词（可切换的追加提示词）')
+await test('追加提示词校验：缺名称/空提示词/重复 id/启用指向不存在的追加提示词都要拒绝', () => {
+  // 合法形态：三全非空 + 启用指向存在的追加提示词。
+  assert.deepEqual(validateSettingsSection({
+    promptProfiles: [{ id: 'a', name: '周报', prompt: '你是周报写手' }],
+    activeProfileId: 'a',
+  }), [])
+  // 全空行（刚点新增还没填）允许存在：保存时客户端会丢弃，宿主不拦。
+  assert.deepEqual(validateSettingsSection({ promptProfiles: [{ id: 'b', name: '', prompt: '' }] }), [])
+  // 没配过追加提示词时，启用为空/缺省都合法。
+  assert.deepEqual(validateSettingsSection({ activeProfileId: '' }), [])
+  assert.deepEqual(validateSettingsSection({ activeProfileId: undefined }), [])
+
+  // 非数组 / 项不是对象。
+  assert.equal(validateSettingsSection({ promptProfiles: 'nope' }).length, 1)
+  assert.equal(validateSettingsSection({ promptProfiles: ['nope'] }).length, 1)
+  // 填了一半的项：缺名称、缺提示词、缺 id 各一条。
+  assert.deepEqual(validateSettingsSection({ promptProfiles: [{ id: 'c', name: '', prompt: 'P' }] }).length, 1)
+  assert.deepEqual(validateSettingsSection({ promptProfiles: [{ id: 'd', name: 'N', prompt: ' ' }] }).length, 1)
+  assert.equal(validateSettingsSection({ promptProfiles: [{ name: 'N', prompt: 'P' }] }).length, 1)
+  // 重复 id。
+  assert.equal(validateSettingsSection({
+    promptProfiles: [
+      { id: 'x', name: 'A', prompt: 'P1' },
+      { id: 'x', name: 'B', prompt: 'P2' },
+    ],
+  }).length, 1)
+  // 数量上限。
+  assert.equal(
+    validateSettingsSection({
+      promptProfiles: Array.from({ length: MAX_PROMPT_PROFILES + 1 }, (_, index) => ({
+        id: `p${String(index)}`, name: `N${String(index)}`, prompt: 'P',
+      })),
+    }).length,
+    1,
+  )
+  // 启用指向不存在的追加提示词（可能刚被删掉）必须拒绝——静默回落会让用户以为它在生效。
+  assert.deepEqual(validateSettingsSection({
+    promptProfiles: [{ id: 'a', name: 'A', prompt: 'P' }],
+    activeProfileId: 'ghost',
+  }).length, 1)
+  // 内置条目（精简/转规格）是常驻种子，即使没有存储条目也可以被启用。
+  assert.deepEqual(validateSettingsSection({ activeProfileId: 'concise' }), [])
+  assert.deepEqual(validateSettingsSection({ activeProfileId: 'spec' }), [])
+})
+await test('追加提示词只追加、不替换：systemPrompt 始终是系统提示词链，追加在拼装时接上', () => {
+  const config = resolveConfig({ systemPrompt: 'CFG' })
+  const profiles = [
+    { id: 'a', name: 'A', prompt: '追加内容 A' },
+    { id: 'b', name: 'B', prompt: '追加内容 B' },
+  ]
+  const active = effectiveConfig(config, { promptProfiles: profiles, activeProfileId: 'b' })
+  // 基底不受启用条目影响；启用状态由 profileId 标注，正文在清单里（拼装时才用）。
+  assert.equal(active.systemPrompt, 'CFG')
+  assert.equal(active.sources.prompt, 'config', '基底来源如实标注为组合配置')
+  assert.equal(active.profileId, 'b')
+  assert.deepEqual(active.profiles.map(profile => [profile.id, profile.label, profile.prompt]), [
+    ['concise', '精简', '在保留全部约束的前提下压缩篇幅，去掉客套与重复表述。'],
+    ['spec', '转规格', '改写为条目式需求，包含背景、目标、约束与验收标准。'],
+    ['a', 'A', '追加内容 A'],
+    ['b', 'B', '追加内容 B'],
+  ])
+
+  // 拼装：基底 + 启用中的那条（与 systemPromptFor 的旧风格/预设同一包装格式）。
+  const appendOf = effective => {
+    const hit = effective.profileId === undefined
+      ? undefined
+      : effective.profiles.find(profile => profile.id === effective.profileId)
+    return hit === undefined ? undefined : { label: hit.label, prompt: hit.prompt }
+  }
+  assert.equal(
+    systemPromptFor({ systemPrompt: active.systemPrompt, presets: [] }, undefined, undefined, appendOf(active)),
+    'CFG\n\n本次额外要求（B）：追加内容 B',
+  )
+
+  // 没启用任何条目：systemPrompt 与没有这个功能之前逐字节相同（profileId 不出现）。
+  const inactive = effectiveConfig(config, {
+    promptProfiles: profiles,
+    activeProfileId: '',
+    customPromptEnabled: true,
+    systemPrompt: '自定义',
+  })
+  assert.equal(inactive.systemPrompt, '自定义')
+  assert.equal(inactive.profileId, undefined)
+  assert.equal(inactive.sources.prompt, 'settings')
+
+  // 启用指向已删除/坏条目的追加提示词：防御性忽略，基底照常。
+  const ghost = effectiveConfig(config, { promptProfiles: profiles, activeProfileId: 'ghost' })
+  assert.equal(ghost.systemPrompt, 'CFG')
+  assert.equal(ghost.profileId, undefined)
+
+  // 坏条目（缺正文）不参与解析。
+  const withJunk = effectiveConfig(config, {
+    promptProfiles: [{ id: 'j', name: '', prompt: '' }, { id: 'a', name: 'A', prompt: '' }],
+    activeProfileId: 'j',
+  })
+  assert.equal(withJunk.systemPrompt, 'CFG')
+  assert.equal(withJunk.profileId, undefined)
+  assert.deepEqual(withJunk.profiles.filter(profile => !profile.builtIn), [])
+})
+await test('内置风格已是追加提示词的种子：默认文案 = 追加要求原文，拼装后与旧多选逐字节一致', () => {
+  const config = resolveConfig({ systemPrompt: 'CFG' })
+  const fragment = '在保留全部约束的前提下压缩篇幅，去掉客套与重复表述。'
+  const active = effectiveConfig(config, { activeProfileId: 'concise' })
+  // 基底仍是 CFG；内置种子在清单里的正文就是那段追加要求。
+  assert.equal(active.systemPrompt, 'CFG')
+  assert.equal(active.profileId, 'concise')
+  assert.equal(active.profiles[0].prompt, fragment)
+  // 清单：内置种子在前（builtIn: true）。
+  assert.deepEqual(active.profiles.map(profile => [profile.id, profile.source, profile.builtIn]), [
+    ['concise', 'default', true],
+    ['spec', 'default', true],
+  ])
+  // 拼装结果与旧"勾选精简"逐字节相同（同一包装格式）。
+  assert.equal(
+    systemPromptFor({ systemPrompt: active.systemPrompt, presets: [] }, undefined, undefined,
+      { label: active.profiles[0].label, prompt: active.profiles[0].prompt }),
+    `CFG\n\n本次额外要求（精简）：${fragment}`,
+  )
+
+  // 追加文案的三层：遗留设置字段（stylePromptConcise）→ 组合配置同 id 预设 → 内置文案。
+  const fromLegacy = effectiveConfig(config, {
+    activeProfileId: 'concise',
+    stylePromptConcise: '旧部署改过的压缩要求',
+  })
+  assert.equal(fromLegacy.profiles[0].prompt, '旧部署改过的压缩要求')
+  assert.equal(fromLegacy.profiles[0].source, 'settings')
+  const fromPreset = effectiveConfig(
+    resolveConfig({ systemPrompt: 'CFG', presets: [{ id: 'concise', label: '精简', prompt: '组合层的压缩要求' }] }),
+    { activeProfileId: 'concise' },
+  )
+  assert.equal(fromPreset.profiles[0].prompt, '组合层的压缩要求')
+  assert.equal(fromPreset.profiles[0].source, 'config')
+
+  // 同 id 的存储条目 = 用户自定义的追加文案（同样只追加，不替换基底）。
+  const overridden = effectiveConfig(config, {
+    promptProfiles: [{ id: 'concise', name: '精简', prompt: '我自己的压缩要求' }],
+    activeProfileId: 'concise',
+  })
+  assert.equal(overridden.systemPrompt, 'CFG', '基底不因自定义追加文案而改变')
+  assert.equal(overridden.profiles[0].prompt, '我自己的压缩要求')
+  assert.equal(overridden.profiles[0].source, 'settings')
+
+  // 内置条目与自定义系统提示词可叠加：基底取自定义，追加接在其后。
+  const withCustom = effectiveConfig(config, {
+    customPromptEnabled: true,
+    systemPrompt: '我的系统提示词',
+    activeProfileId: 'spec',
+  })
+  const spec = withCustom.profiles.find(profile => profile.id === 'spec')
+  assert.equal(
+    systemPromptFor({ systemPrompt: withCustom.systemPrompt, presets: [] }, undefined, undefined,
+      { label: spec.label, prompt: spec.prompt }),
+    '我的系统提示词\n\n本次额外要求（转规格）：改写为条目式需求，包含背景、目标、约束与验收标准。',
+  )
+})
+await test('profileRowsOf：catalog 的清单行只有 id/名称/来源/是否内置，绝不含正文', () => {
+  assert.deepEqual(profileRowsOf(undefined), [])
+  assert.deepEqual(profileRowsOf(null), [])
+  assert.deepEqual(profileRowsOf({}), [])
+  const effective = effectiveConfig(resolveConfig({}), {
+    promptProfiles: [
+      { id: 'concise', name: '精简', prompt: '覆盖内置的正文' },
+      { id: 'weekly', name: '周报', prompt: '绝不能出现的正文' },
+      { id: 'noname', name: '', prompt: '没名字的追加提示词' },
+    ],
+    activeProfileId: 'weekly',
+  })
+  assert.deepEqual(profileRowsOf(effective), [
+    { id: 'concise', name: '精简', source: 'settings', builtIn: true },
+    { id: 'spec', name: '转规格', source: 'default', builtIn: true },
+    { id: 'weekly', name: '周报', source: 'settings', builtIn: false },
+    { id: 'noname', name: 'noname', source: 'settings', builtIn: false },
+  ])
+})
+
 console.log('settings: 命名空间注册')
 await test('注册 better-input 命名空间，applies=live，validate 拒绝非法组合', () => {
   const { settingsCalls } = setup({})
@@ -1046,6 +1227,109 @@ await test('catalog：provider 目录 + 当前生效配置 + 来源标注', asyn
   assert.equal(result.json.effective.model, 'set-m')
   assert.equal(result.json.effective.sources.model, 'settings')
   assert.equal(result.json.effective.sources.prompt, 'settings')
+})
+await test('catalog：清单行 + 默认提示词 + 启用中的追加条目 id（正文绝不下发）', async () => {
+  const config = { systemPrompt: '部署默认提示词' }
+  setup(config, {
+    settingsSection: {
+      promptProfiles: [
+        { id: 'weekly', name: '周报模式', prompt: '周报追加提示词的正文' },
+        { id: 'todo', name: '待办模式', prompt: '待办追加提示词的正文' },
+      ],
+      activeProfileId: 'weekly',
+    },
+  })
+  const result = await drivePath(ROUTE_CATALOG, fakeRequest({ method: 'GET' }))
+  assert.equal(result.status, 200)
+  // 清单行 = 内置种子在前 + 用户条目；只有 id/名称/来源/是否内置，绝不带 prompt 字段
+  // （正文走用户自己的设置镜像，不走这份清单）。
+  assert.deepEqual(result.json.profiles, [
+    { id: 'concise', name: '精简', source: 'default', builtIn: true },
+    { id: 'spec', name: '转规格', source: 'default', builtIn: true },
+    { id: 'weekly', name: '周报模式', source: 'settings', builtIn: false },
+    { id: 'todo', name: '待办模式', source: 'settings', builtIn: false },
+  ])
+  assert.equal(
+    result.json.profiles.some(profile => 'prompt' in profile),
+    false,
+    '清单行不能带 prompt 字段',
+  )
+  // 默认提示词有意下发（设置页要求"系统提示词可见"），值是内置/组合层的默认。
+  assert.equal(result.json.defaults.systemPrompt, '部署默认提示词')
+  // 启用中的追加条目 id 在 effective 里；没启用时是 null。
+  assert.equal(result.json.effective.profileId, 'weekly')
+  // 基底来源如实标注（追加提示词不改基底，所以这里仍是组合配置）。
+  assert.equal(result.json.effective.sources.prompt, 'config')
+
+  // 没配任何追加提示词时：profiles 只剩内置种子、profileId 为 null，默认提示词仍然下发。
+  setup(config, {})
+  const none = await drivePath(ROUTE_CATALOG, fakeRequest({ method: 'GET' }))
+  assert.deepEqual(none.json.profiles, [
+    { id: 'concise', name: '精简', source: 'default', builtIn: true },
+    { id: 'spec', name: '转规格', source: 'default', builtIn: true },
+  ])
+  assert.equal(none.json.effective.profileId, null)
+  assert.equal(typeof none.json.defaults.systemPrompt, 'string')
+})
+await test('启用的追加提示词接在系统提示词之后（追加，不替换）', async () => {
+  const observations = setup({}, {
+    chunks: TEXT_CHUNKS,
+    selection: { provider: 'agent-p', model: 'agent-m' },
+    settingsSection: {
+      customPromptEnabled: true,
+      systemPrompt: '自定义提示词',
+      promptProfiles: [{ id: 'weekly', name: '周报模式', prompt: '周报追加提示词的正文' }],
+      activeProfileId: 'weekly',
+    },
+  })
+  const result = await drive(fakeRequest({ body: '{"text":"x"}' }))
+  assert.equal(result.status, 200)
+  assert.equal(
+    observations.calls[0].system,
+    '自定义提示词\n\n本次额外要求（周报模式）：周报追加提示词的正文',
+    '启用中的追加提示词必须接在系统提示词之后',
+  )
+
+  // 切为不追加（activeProfileId 置空）：下一次请求只剩系统提示词链（这里是设置页自定义提示词）。
+  observations.settingsState.section = { ...observations.settingsState.section, activeProfileId: '' }
+  await drive(fakeRequest({ body: '{"text":"x"}' }))
+  assert.equal(observations.calls[1].system, '自定义提示词')
+})
+await test('启用内置追加提示词（精简）= 默认链 + 追加要求；老客户端 styleIds 兼容路径不受影响', async () => {
+  const observations = setup({ systemPrompt: 'BASE' }, {
+    chunks: TEXT_CHUNKS,
+    selection: { provider: 'agent-p', model: 'agent-m' },
+    settingsSection: { activeProfileId: 'concise' },
+  })
+  await drive(fakeRequest({ body: '{"text":"x"}' }))
+  // 新客户端（不发 styleIds）选中内置追加提示词：合成结果与旧"勾选精简"逐字节一致。
+  assert.equal(
+    observations.calls[0].system,
+    'BASE\n\n本次额外要求（精简）：在保留全部约束的前提下压缩篇幅，去掉客套与重复表述。',
+  )
+
+  // 旧客户端（发 styleIds）在没启用任何追加提示词时：追加路径原样保留，两条互不打扰。
+  observations.settingsState.section = {}
+  await drive(fakeRequest({ body: JSON.stringify({ text: 'x', styleIds: ['concise'] }) }))
+  assert.equal(
+    observations.calls[1].system,
+    'BASE\n\n本次额外要求（精简）：在保留全部约束的前提下压缩篇幅，去掉客套与重复表述。',
+  )
+})
+await test('settings 命名空间的 schema 认识追加提示词字段（数组形状由 schema 把关）', () => {
+  const { settingsCalls } = setup({})
+  const schema = settingsCalls[0].schema
+  const resolved = schema({
+    promptProfiles: [{ id: 'a', name: 'A', prompt: 'P' }],
+    activeProfileId: 'a',
+  })
+  assert.deepEqual(resolved.promptProfiles, [{ id: 'a', name: 'A', prompt: 'P' }])
+  assert.equal(resolved.activeProfileId, 'a')
+  assert.throws(() => schema({ promptProfiles: 'nope' }), undefined, '非数组必须被 schema 拒绝')
+  assert.throws(() => schema({ promptProfiles: [42] }), undefined, '非对象条目必须被 schema 拒绝')
+  // 字段名走常量：schema、校验、重置清单与客户端镜像共享同一份，不会各说各话。
+  assert.equal(SETTINGS_FIELD_KEYS.includes(PROMPT_PROFILES_FIELD), true)
+  assert.equal(SETTINGS_FIELD_KEYS.includes(ACTIVE_PROFILE_FIELD), true)
 })
 await test('catalog：目录读取失败不致命，退化成空列表', async () => {
   setup({}, { providersFail: new Error('registry down') })

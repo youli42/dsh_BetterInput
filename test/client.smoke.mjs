@@ -335,8 +335,16 @@ function installFetch(options = {}) {
           timeoutMs: { min: 1000, max: 600000 },
         },
         presets: options.presets ?? [],
-        styles: options.styles ?? [],
-        effective: { provider: null, model: null, temperature: null, maxOutputTokens: 1024, timeoutMs: 30000 },
+        styles: [],
+        profiles: options.profiles ?? [
+          { id: 'concise', name: '精简', source: 'default', builtIn: true },
+          { id: 'spec', name: '转规格', source: 'default', builtIn: true },
+        ],
+        defaults: { systemPrompt: '内置默认提示词' },
+        effective: {
+          profileId: options.activeProfileId ?? null,
+          provider: null, model: null, temperature: null, maxOutputTokens: 1024, timeoutMs: 30000,
+        },
       }
       const status = options.failCatalog === true ? 500 : 200
       return Promise.resolve({ ok: status === 200, status, json: async () => data })
@@ -600,8 +608,8 @@ function mount(options = {}) {
       presetToggle,
       /** 菜单项（按渲染顺序）。 */
       presetItems,
-      /** 风格复选框（多选控件，按渲染顺序）。 */
-      styleBoxes: byProp(node, 'data-dsh-better-input-style'),
+      /** 追加提示词菜单项（含「默认」项，按渲染顺序；'' = 默认）。 */
+      profileItems: byProp(node, 'data-dsh-better-input-profile'),
       /** 菜单里的「按所选风格优化」按钮。 */
       apply: byProp(node, 'data-dsh-better-input-apply')[0] ?? null,
       /** 菜单是否展开（由 DOM 推导，而不是读组件内部 state）。 */
@@ -667,9 +675,15 @@ function installSettingsFetch(options = {}) {
         namespace: SETTINGS_NAMESPACE,
         settings: { available: true, section: {} },
         providers: [{ id: 'acme', name: 'Acme' }, { id: 'deepseek-official', name: 'DeepSeek' }],
-        styles: options.styles ?? [],
+        styles: [],
+        profiles: options.profiles ?? [
+          { id: 'concise', name: '精简', source: 'default', builtIn: true },
+          { id: 'spec', name: '转规格', source: 'default', builtIn: true },
+        ],
+        defaults: { systemPrompt: '默认提示词全文' },
         configPath: 'C:\\fake\\dsh-better-input\\cordis.patch.yml',
         effective: {
+          profileId: options.activeProfileId ?? null,
           provider: null,
           model: null,
           temperature: null,
@@ -715,15 +729,29 @@ function mountSettings(options = {}) {
     const notes = []
     const errors = []
     const datalists = new Map()
-    /** 递归收集（元素是嵌套的：按钮在 .dsh-bi-actions 里，datalist 在 fieldset 里）。 */
+    const profileActive = new Map()
+    const expands = new Map()
+    const textareas = []
+    let defaultPromptText = null
+    /** 递归收集（元素是嵌套的：按钮在 .dsh-bi-actions 里，datalist 在分组体里）。 */
     const walk = (element) => {
       if (element === null || typeof element !== 'object') return
       const className = typeof element.props?.className === 'string' ? element.props.className : ''
       if (element.props?.['data-dsh-bi-field'] !== undefined) inputs.set(element.props['data-dsh-bi-field'], element)
       if (element.props?.['data-dsh-bi-action'] !== undefined) buttons.push(element)
+      if (element.props?.['data-dsh-bi-expand'] !== undefined) expands.set(element.props['data-dsh-bi-expand'], element)
+      if (element.type === 'textarea') textareas.push(element)
       if (className.includes('dsh-bi-note')) notes.push(element)
       if (className === 'dsh-bi-error') errors.push(childrenOf(element)[0])
       if (element.type === 'datalist' && typeof element.props.id === 'string') datalists.set(element.props.id, element)
+      if (element.props?.['data-dsh-bi-profile-active'] !== undefined) {
+        profileActive.set(element.props['data-dsh-bi-profile-active'], element)
+      }
+      if (element.props?.['data-dsh-bi-default-prompt'] === 'view') {
+        // 展开视图里的 <pre> 是默认提示词正文。
+        const pre = childrenOf(element).find(child => child.type === 'pre')
+        defaultPromptText = pre === undefined ? null : childrenOf(pre)[0]
+      }
       for (const child of childrenOf(element)) walk(child)
     }
     walk(node)
@@ -735,6 +763,14 @@ function mountSettings(options = {}) {
       errors,
       notes,
       datalists,
+      /** 追加提示词「启用」单选（按追加条目 id，'' = 不追加）。 */
+      profileActive,
+      /** 「编辑」开关（按分组键：prompt / model / params / profile:<id>）。 */
+      expands,
+      /** 多行文本控件（默认视图里应当一个都没有）。 */
+      textareas,
+      /** 展开的默认提示词正文（未展开时为 null）。 */
+      defaultPromptText,
       noteText: notes.length === 0 ? null : childrenOf(notes[notes.length - 1])[0],
       noteTone: notes.length === 0 ? null : notes[notes.length - 1].props['data-tone'],
       action(name) {
@@ -745,7 +781,24 @@ function mountSettings(options = {}) {
     }
   }
 
-  return { harness, network, view, face, scope: harness.scope, binds: harness.binds }
+  /**
+   * 展开若干分组/行。
+   *
+   * P10 起输入框**默认不渲染**（收起的分组里根本没有 input/textarea），所以用例要先点「编辑」。
+   * 已经是展开态时是空操作，重复调用安全。
+   * @param {...string} keys - 分组键（prompt / model / params / profile:<id>）。
+   * @returns {object} 展开后的视图。
+   */
+  const open = (...keys) => {
+    for (const key of keys) {
+      const toggle = view().expands.get(key)
+      assert.ok(toggle !== undefined, `expand toggle ${key} must exist`)
+      if (toggle.props['aria-expanded'] !== true) toggle.props.onClick()
+    }
+    return view()
+  }
+
+  return { harness, network, view, open, face, scope: harness.scope, binds: harness.binds }
 }
 
 console.log('client half: bundle 包装与插件契约')
@@ -996,15 +1049,12 @@ await test('草稿含芯片时拒绝发请求（整体替换会丢引用）', as
   assert.deepEqual(harness.written, [])
 })
 
-console.log('client half: 预设菜单与宿主下发的规则（P5.2/P5.3）')
-await test('菜单的关闭手势：点外面/Esc 收起，点菜单**内部**不收起（多选才能连着勾）', async () => {
-  // 这条用例的存在理由：`onDown` 若只是 `setMenuOpen(false)`，勾第一个风格就会把菜单关掉，
-  // "多选"直接不可用——而手写替身如果 `addEventListener` 是空函数，这个缺陷永远测不出来。
+console.log('client half: 追加提示词菜单与宿主下发的规则（P5.3 / P8 合并）')
+await test('菜单的关闭手势：点外面/Esc 收起，点菜单**内部**不收起（切追加提示词要看清选中态）', async () => {
+  // 这条用例的存在理由：`onDown` 若只是 `setMenuOpen(false)`，点追加提示词项就会把菜单关掉，
+  // 用户看不到选中标记移动——而手写替身如果 `addEventListener` 是空函数，这个缺陷永远测不出来。
   installFetch({
-    styles: [
-      { id: 'concise', label: '精简', source: 'default' },
-      { id: 'spec', label: '转规格', source: 'default' },
-    ],
+    profiles: [{ id: 'concise', name: '精简', source: 'default', builtIn: true }],
   })
   const harness = mount({ draft: '草稿' })
   harness.view()
@@ -1012,7 +1062,7 @@ await test('菜单的关闭手势：点外面/Esc 收起，点菜单**内部**�
   await harness.view().presetToggle.props.onClick()
   assert.equal(harness.view().menuOpen, true)
 
-  // 点在菜单内部（勾选框的 target.closest 能命中菜单）→ 必须保持展开。
+  // 点在菜单内部（追加提示词项的 target.closest 能命中菜单）→ 必须保持展开。
   const insideTarget = { closest: (selector) => (selector === '[data-dsh-better-input-menu]' ? {} : null) }
   assert.equal(dispatchMouseDown(insideTarget), 1, '菜单展开时应当挂着 document 的关闭监听')
   assert.equal(harness.view().menuOpen, true, '点在菜单内部不得收起菜单')
@@ -1032,32 +1082,92 @@ await test('菜单的关闭手势：点外面/Esc 收起，点菜单**内部**�
   assert.equal(documentListeners.get('mousedown').length, 0)
   assert.equal(documentListeners.get('keydown').length, 0)
 })
-await test('预设菜单（单选）：宿主配了预设且没配风格时，行为与从前一致', async () => {
-  const network = installFetch({ presets: [{ id: 'concise', label: '精简' }, { id: 'spec', label: '转规格' }] })
+await test('内置条目（精简/转规格）常驻菜单：单选切换落盘 activeProfileId，请求不带 styleIds', async () => {
+  const network = installFetch()
+  const harness = mount({ draft: '帮我写个脚本' })
+  harness.view()
+  await tick()
+  await harness.view().presetToggle.props.onClick()
+  let view = harness.view()
+  assert.equal(view.menuOpen, true)
+  assert.deepEqual(
+    view.profileItems.map(item => item.props['data-dsh-better-input-profile']),
+    ['', 'concise', 'spec'],
+    '「默认」在最前，内置的精简/转规格随后',
+  )
+  assert.equal(view.profileItems[0].props['data-active'], true, '初始：默认被选中')
+  assert.equal(view.profileItems[1].props['data-active'], false)
+  assert.equal(view.profileItems[1].props.role, 'menuitemradio', '追加提示词是单选语义（不是旧多选的复选框）')
+
+  // 点「精简」：乐观更新选中标记；落盘 activeProfileId；菜单不收起。
+  await view.profileItems[1].props.onClick()
+  await tick()
+  view = harness.view()
+  assert.deepEqual(harness.scope.mutations, [{
+    ops: [{ op: 'set', path: ['activeProfileId'], value: 'concise' }],
+    revision: 7,
+  }])
+  assert.equal(view.profileItems[1].props['data-active'], true)
+  assert.equal(view.profileItems[0].props['data-active'], false)
+  assert.equal(view.menuOpen, true, '切换不收起菜单')
+
+  // 发起优化：请求体**不带** styleIds（合并后追加提示词由宿主按 activeProfileId 现读）。
+  const pending = view.optimize.props.onClick()
+  assert.deepEqual(network.postCalls[0].body, { text: '帮我写个脚本', sessionId: harness.sessionId })
+  network.respond({ data: { text: '精简后的文本' } })
+  await pending
+  assert.equal(harness.truth.draft, '精简后的文本')
+
+  // 切回「默认」：发 unset。
+  await harness.view().presetToggle.props.onClick()
+  await harness.view().profileItems[0].props.onClick()
+  await tick()
+  assert.deepEqual(harness.scope.mutations[1].ops, [{ op: 'unset', path: ['activeProfileId'] }])
+})
+await test('宿主拒绝切换时不假报成功：选中标记回退、给错误提示', async () => {
+  installFetch()
+  const harness = mount({
+    draft: '草稿',
+    settings: { mutateRefuse: true },
+  })
+  harness.view()
+  await tick()
+  await harness.view().presetToggle.props.onClick()
+  await harness.view().profileItems[1].props.onClick()
+  await tick()
+  const view = harness.view()
+  assert.equal(harness.scope.mutations.length, 1, '确实发起了写入')
+  assert.equal(view.profileItems[0].props['data-active'], true, '失败后选中标记回退到「默认」')
+  assert.equal(view.noteTone, 'error')
+  assert.equal(view.noteText, 'profile.switchFailed')
+})
+await test('一次性预设：点一次跑一次，请求带 presetId（与追加提示词共存不混淆）', async () => {
+  const network = installFetch({ presets: [{ id: 'shorter', label: '更短' }] })
   const harness = mount({ draft: '帮我写个爬虫' })
   harness.view()
-  await tick()                       // 目录请求落地 → 预设渲染
+  await tick()                       // 目录请求落地 → 追加提示词与预设渲染
   let view = harness.view()
-  assert.notEqual(view.presetToggle, null, '配了预设就必须出现菜单按钮')
-  assert.equal(view.presetToggle.props['aria-expanded'], false)
-  assert.equal(view.presetToggle.props['aria-haspopup'], 'menu')
+  assert.notEqual(view.presetToggle, null, '有追加提示词/预设就必须出现菜单按钮')
   assert.equal(view.menuOpen, false, '默认不展开')
 
   await view.presetToggle.props.onClick()
   view = harness.view()
-  assert.equal(view.presetToggle.props['aria-expanded'], true)
-  assert.equal(view.menuOpen, true)
-  assert.deepEqual(view.presetItems.map(item => childrenOf(item)[0]), ['精简', '转规格'])
+  assert.deepEqual(view.presetItems.map(item => childrenOf(item)[0]), ['更短'])
+  assert.deepEqual(
+    view.profileItems.map(item => item.props['data-dsh-better-input-profile']),
+    ['', 'concise', 'spec'],
+    '追加提示词区在前，预设区在后',
+  )
 
-  const pending = view.presetItems[1].props.onClick()
+  const pending = view.presetItems[0].props.onClick()
   assert.deepEqual(network.postCalls[0].body, {
     text: '帮我写个爬虫',
     sessionId: harness.sessionId,
-    presetId: 'spec',
+    presetId: 'shorter',
   })
-  network.respond({ data: { text: '按规格改写后的需求', presetId: 'spec' } })
+  network.respond({ data: { text: '更短的改写', presetId: 'shorter' } })
   await pending
-  assert.equal(harness.truth.draft, '按规格改写后的需求')
+  assert.equal(harness.truth.draft, '更短的改写')
   assert.equal(harness.view().menuOpen, false, '选完必须收起菜单')
 })
 await test('点主按钮不带 presetId（默认提示词路径不变）', async () => {
@@ -1070,114 +1180,26 @@ await test('点主按钮不带 presetId（默认提示词路径不变）', async
   network.respond({ data: { text: '改写后' } })
   await pending
 })
-await test('没配预设 / 目录读失败：不渲染菜单按钮，主按钮照常可用', async () => {
-  installFetch({ presets: [], styles: [] })   // 全局 fetch 替身：目录返回"没有预设、也没有风格"
-  const harness = mount({ draft: '草稿' })
-  harness.view()
-  await tick()
-  assert.equal(harness.view().presetToggle, null, '风格与预设都为空时视觉必须与从前一致')
-
+await test('目录读失败：不渲染菜单按钮，主按钮照常可用', async () => {
   const broken = installFetch({ failCatalog: true })
   const other = mount({ draft: '草稿' })
   other.view()
   await tick()
-  assert.equal(other.view().presetToggle, null, '目录读失败也不能冒出一个空菜单')
+  assert.equal(other.view().presetToggle, null, '目录读失败不能冒出一个空菜单')
   const pending = other.view().optimize.props.onClick()
   assert.equal(broken.postCalls.length, 1, '主按钮不受目录失败影响')
   broken.respond({ data: { text: '改写后' } })
   await pending
   assert.equal(other.truth.draft, '改写后')
 })
-await test('多选优化风格：勾选可叠加、可取消，请求带 styleIds', async () => {
-  const network = installFetch({
-    styles: [
-      { id: 'concise', label: '精简', source: 'default' },
-      { id: 'spec', label: '转规格', source: 'config' },
-    ],
-  })
-  const harness = mount({ draft: '帮我写个脚本' })
-  harness.view()
-  await tick()
-
-  const closed = harness.view()
-  assert.notEqual(closed.presetToggle, null, '有风格就必须出现下拉框')
-  assert.equal(closed.presetToggle.props['data-selected'], 0, '默认一个都没勾')
-  assert.deepEqual(closed.styleBoxes, [], '菜单没展开时不渲染勾选框')
-
-  await closed.presetToggle.props.onClick()
-  let view = harness.view()
-  assert.deepEqual(
-    view.styleBoxes.map(box => box.props['data-dsh-better-input-style']),
-    ['concise', 'spec'],
-    '两个内置风格都要能勾',
-  )
-  assert.equal(view.styleBoxes.every(box => box.props.type === 'checkbox'), true, '多选必须是复选而不是单选')
-  assert.equal(view.styleBoxes.every(box => box.props.checked === false), true)
-
-  // 勾一个：菜单**不收起**（多选要能连续点），按钮上出现计数。
-  view.styleBoxes[0].props.onChange()
-  view = harness.view()
-  assert.equal(view.menuOpen, true, '勾选不收起菜单（否则没法多选）')
-  assert.equal(view.presetToggle.props['data-selected'], 1)
-  assert.deepEqual(view.styleBoxes.map(box => box.props.checked), [true, false])
-
-  // 再勾一个：两个同时选中。
-  view.styleBoxes[1].props.onChange()
-  view = harness.view()
-  assert.equal(view.presetToggle.props['data-selected'], 2)
-  assert.deepEqual(view.styleBoxes.map(box => box.props.checked), [true, true])
-
-  // 取消第一个：只剩第二个。
-  view.styleBoxes[0].props.onChange()
-  view = harness.view()
-  assert.deepEqual(view.styleBoxes.map(box => box.props.checked), [false, true])
-
-  // 用「按所选风格优化」按钮发起：请求体带上勾选的 id。
-  const pending = view.apply.props.onClick()
-  assert.deepEqual(network.postCalls[0].body, {
-    text: '帮我写个脚本',
-    sessionId: harness.sessionId,
-    styleIds: ['spec'],
-  })
-  network.respond({ data: { text: '条目化后的需求', styleIds: ['spec'] } })
-  await pending
-  assert.equal(harness.truth.draft, '条目化后的需求')
-  assert.equal(harness.view().menuOpen, false, '发起后菜单必须收起')
-})
-await test('勾选保留在按钮上：主按钮也用所选风格（不勾则完全不发 styleIds）', async () => {
-  const network = installFetch({
-    styles: [{ id: 'concise', label: '精简', source: 'default' }],
-  })
-  const harness = mount({ draft: '草稿' })
-  harness.view()
-  await tick()
-
-  await harness.view().presetToggle.props.onClick()
-  harness.view().styleBoxes[0].props.onChange()
-
-  // 主按钮（✨）同样带上勾选的风格——风格是"当前选中的偏好"，不是某一次按钮的专属。
-  const pending = harness.view().optimize.props.onClick()
-  assert.deepEqual(network.postCalls[0].body, {
-    text: '草稿',
-    sessionId: harness.sessionId,
-    styleIds: ['concise'],
-  })
-  network.respond({ data: { text: '改写后' } })
-  await pending
-
-  // 取消勾选后再点：body 里**不能**出现 styleIds（老宿主对此一无所知）。
-  await harness.view().presetToggle.props.onClick()
-  harness.view().styleBoxes[0].props.onChange()
-  const again = harness.view().optimize.props.onClick()
-  assert.deepEqual(network.postCalls[1].body, { text: '改写后', sessionId: harness.sessionId })
-  network.respond({ data: { text: '再改写' } })
-  await again
-})
-await test('内置风格不进"预设"区（避免同一个风格出现两次）', async () => {
-  // 真实部署里 `cordis.patch.yml` 的 presets 就是 concise/spec —— 它们现在是内置风格，
-  // 若原样列进预设区，用户会在菜单里看到两个"精简"。
+await test('与内置追加提示词同 id 的预设不进"预设"区（避免同一个名字出现两次）', async () => {
+  // 真实部署里 `cordis.patch.yml` 的 presets 就是 concise/spec —— 合并后它们是内置追加提示词的
+  // 追加要求来源；若原样列进预设区，用户会在菜单里看到两个"精简"。
   installFetch({
-    styles: [{ id: 'concise', label: '精简', source: 'config' }, { id: 'spec', label: '转规格', source: 'config' }],
+    profiles: [
+      { id: 'concise', name: '精简', source: 'config', builtIn: true },
+      { id: 'spec', name: '转规格', source: 'config', builtIn: true },
+    ],
     presets: [{ id: 'concise', label: '精简' }, { id: 'spec', label: '转规格' }, { id: 'shorter', label: '更短' }],
   })
   const harness = mount({ draft: '草稿' })
@@ -1188,29 +1210,12 @@ await test('内置风格不进"预设"区（避免同一个风格出现两次）
   assert.deepEqual(
     view.presetItems.map(item => item.props['data-dsh-better-input-preset']),
     ['shorter'],
-    '与风格同 id 的预设要从预设区剔除，只剩真正的一次性预设',
+    '与内置追加提示词同 id 的预设要从预设区剔除，只剩真正的一次性预设',
   )
-  assert.deepEqual(view.styleBoxes.map(box => box.props['data-dsh-better-input-style']), ['concise', 'spec'])
-})
-await test('风格与预设可以同时选：一次请求同时带 presetId 与 styleIds', async () => {
-  const network = installFetch({
-    styles: [{ id: 'spec', label: '转规格', source: 'default' }],
-    presets: [{ id: 'shorter', label: '更短' }],
-  })
-  const harness = mount({ draft: '草稿' })
-  harness.view()
-  await tick()
-  await harness.view().presetToggle.props.onClick()
-  harness.view().styleBoxes[0].props.onChange()
-  const pending = harness.view().presetItems[0].props.onClick()
-  assert.deepEqual(network.postCalls[0].body, {
-    text: '草稿',
-    sessionId: harness.sessionId,
-    presetId: 'shorter',
-    styleIds: ['spec'],
-  })
-  network.respond({ data: { text: '改写后' } })
-  await pending
+  assert.deepEqual(
+    view.profileItems.map(item => item.props['data-dsh-better-input-profile']),
+    ['', 'concise', 'spec'],
+  )
 })
 await test('客户端与宿主的风格字段镜像必须一致（漂移就红）', async () => {
   // 客户端 bundle 不能 import policy.js，所以 STYLE_IDS / stylePromptField 是镜像。
@@ -1266,7 +1271,7 @@ await test('设置页区间也走宿主下发：换一组 limits 立刻生效', 
   })
   page.view()
   await tick()
-  let view = page.view()
+  let view = page.open('params')
   assert.equal(view.inputs.get('maxOutputTokens').props.min, 1, '输入框 min 也要用宿主下发值')
   assert.equal(view.inputs.get('timeoutMs').props.min, 2000)
 
@@ -1301,7 +1306,7 @@ await test('设置页区间也走宿主下发：换一组 limits 立刻生效', 
   })
   ok.view()
   await tick()
-  let okView = ok.view()
+  let okView = ok.open('params')
   okView.inputs.get('maxOutputTokens').props.onChange({ target: { value: '100' } })
   okView.inputs.get('timeoutMs').props.onChange({ target: { value: '5000' } })
   okView = ok.view()
@@ -1536,17 +1541,85 @@ await test('注册进 settings.section，并按命名空间绑定设置作用域
   assert.equal(typeof face.catalog.models, 'function')
   assert.equal(typeof face.catalog.check, 'function')
 })
-await test('未配置时表单显示为空，且不报错（回落到默认）', () => {
+await test('紧凑布局：默认不渲染任何输入框，点「编辑」后才出现（P10 验收 1）', async () => {
   const page = mountSettings({ settingsValue: undefined })
-  const view = page.view()
-  assert.equal(view.inputs.get('customPromptEnabled').props.checked, false)
-  assert.equal(view.inputs.get('systemPrompt').props.value, '')
-  assert.equal(view.inputs.get('modelProvider').props.value, '')
-  assert.equal(view.inputs.get('modelId').props.value, '')
-  assert.equal(view.errors.length, 0, '未配置不该有校验错误')
-  assert.equal(view.action('save').props.disabled, false)
-  // 首屏拉了目录，并展示「当前生效」一行
+  const closed = page.view()
+  // 默认视图：可编辑字段与多行文本控件一个都没有（只有取值单选与「编辑」开关）。
+  assert.equal(closed.inputs.size, 0, '默认不得渲染任何输入框')
+  assert.equal(closed.textareas.length, 0, '默认不得渲染任何 textarea')
+  assert.equal(closed.errors.length, 0, '未配置不该有校验错误')
+  assert.equal(closed.action('save').props.disabled, false, '保存按钮常驻顶部、无需滚动')
+  assert.equal(closed.action('reset').props.disabled, false)
+  assert.equal(closed.action('open-config').props.disabled, false)
+  // 四个分组标题 + 各自一行摘要（收起时唯一的信息来源）。
+  assert.deepEqual(
+    [...closed.expands.keys()].sort(),
+    ['model', 'params', 'prompt', 'profile:concise', 'profile:spec'].sort(),
+    '每个分组与内置条目都有「编辑」开关',
+  )
+  assert.equal(closed.expands.get('prompt').props['aria-expanded'], false)
+
+  // 触发后：控件出现且可用，值仍为空（回落到默认）。
+  const opened = page.open('prompt', 'model', 'params')
+  assert.equal(opened.inputs.get('customPromptEnabled').props.checked, false)
+  assert.equal(opened.inputs.get('systemPrompt').props.value, '')
+  assert.equal(opened.inputs.get('modelProvider').props.value, '')
+  assert.equal(opened.inputs.get('modelId').props.value, '')
+  assert.equal(opened.textareas.length, 1, '展开系统提示词后出现它的 textarea')
+  assert.equal(opened.expands.get('prompt').props['aria-expanded'], true)
+
+  // 再点一次 = 收起，输入框重新从 DOM 里消失。
+  opened.expands.get('prompt').props.onClick()
+  assert.equal(page.view().inputs.has('systemPrompt'), false, '收起后输入框必须消失')
+
+  // 首屏拉了目录（摘要与来源标注都要宿主下发）。
   assert.equal(page.network.calls.some(call => call.url === ROUTE_CATALOG), true)
+})
+await test('紧凑布局的样式与一屏项数：行距压小、旧 fieldset 版式不再存在（P10 验收 2/3）', async () => {
+  const page = mountSettings({ settingsValue: {} })
+  page.view()
+  await tick()
+  const css = appendedStyles[0].textContent
+
+  // 行距/字号按"一屏能塞下全部分组"来定：分组间距 8px、字号 12px、组头 24px、清单行 22px。
+  assert.equal(css.includes('.dsh-bi-form{display:flex;flex-direction:column;gap:8px'), true, '分组间距必须压到 8px')
+  assert.equal(css.includes('font-size:12px;line-height:1.45'), true, '正文 12px / 行高 1.45')
+  assert.equal(css.includes('.dsh-bi-group-head{display:flex;align-items:center;gap:6px;min-height:24px'), true)
+  assert.equal(css.includes('.dsh-bi-prow{display:flex;align-items:center;gap:6px;min-height:22px'), true)
+  // 旧版式（14px 内边距的 fieldset + 大 legend + 18px 间距）必须彻底消失，避免两套密度混着用。
+  for (const gone of ['.dsh-bi-fieldset', '.dsh-bi-legend', '.dsh-bi-grid', 'gap:18px', 'padding:14px', 'min-height:140px']) {
+    assert.equal(css.includes(gone), false, `旧版式残留：${gone}`)
+  }
+
+  // 一次操作就能看到全部主要设置：默认视图里 4 个分组头 + 清单行 + 操作条，且都带摘要。
+  const view = page.view()
+  const badges = []
+  const groupHeads = []
+  const rows = []
+  const walk = (element) => {
+    if (element === null || typeof element !== 'object') return
+    if (element.props?.['data-dsh-bi-badge'] !== undefined) badges.push(element.props['data-dsh-bi-badge'])
+    if (element.props?.['data-dsh-bi-group'] !== undefined) groupHeads.push(element.props['data-dsh-bi-group'])
+    if (element.props?.['data-dsh-bi-profile'] !== undefined) rows.push(element.props['data-dsh-bi-profile'])
+    for (const child of childrenOf(element)) walk(child)
+  }
+  walk(view.node)
+  assert.deepEqual(groupHeads, ['prompt', 'profiles', 'model', 'params'], '四个分组都在默认视图里')
+  assert.deepEqual(badges.sort(), ['model', 'params', 'profiles', 'prompt'], '每个分组都有一行摘要')
+  assert.deepEqual(rows, ['', 'concise', 'spec'], '追加提示词清单常驻，无需展开即可切换')
+  // 单选在紧凑行里没有独立标签，必须有可访问名（读屏可用）。
+  for (const key of ['', 'concise', 'spec']) {
+    assert.equal(
+      typeof view.profileActive.get(key).props['aria-label'] === 'string'
+        && view.profileActive.get(key).props['aria-label'] !== '',
+      true,
+      `清单行 ${key || '(不追加)'} 的单选缺少可访问名`,
+    )
+  }
+  // 操作条常驻顶部：保存/恢复默认/打开配置文件都在默认视图里。
+  assert.equal(view.action('save') !== undefined, true)
+  assert.equal(view.action('reset') !== undefined, true)
+  assert.equal(view.action('open-config') !== undefined, true)
 })
 await test('已保存的配置会被回填（刷新页面后仍然显示）', () => {
   const page = mountSettings({
@@ -1560,7 +1633,7 @@ await test('已保存的配置会被回填（刷新页面后仍然显示）', ()
       timeoutMs: 15000,
     },
   })
-  const view = page.view()
+  const view = page.open('prompt', 'model', 'params')
   assert.equal(view.inputs.get('customPromptEnabled').props.checked, true)
   assert.equal(view.inputs.get('systemPrompt').props.value, '我的提示词')
   assert.equal(view.inputs.get('modelProvider').props.value, 'acme')
@@ -1571,7 +1644,7 @@ await test('已保存的配置会被回填（刷新页面后仍然显示）', ()
 })
 await test('改动后保存：只发变化的字段，带 revision，原子提交', async () => {
   const page = mountSettings({ settingsValue: { modelProvider: 'acme', modelId: 'm1' } })
-  let view = page.view()
+  let view = page.open('prompt', 'params')
   view.inputs.get('systemPrompt').props.onChange({ target: { value: '新提示词' } })
   view.inputs.get('customPromptEnabled').props.onChange({ target: { checked: true } })
   view.inputs.get('temperature').props.onChange({ target: { value: '0.2' } })
@@ -1595,9 +1668,9 @@ await test('没有改动时保存不发请求，只提示', async () => {
   assert.equal(page.scope.mutations.length, 0)
   assert.equal(page.view().noteText, 'settings.noChange')
 })
-await test('校验失败：不保存、逐字段给可读提示', async () => {
+await test('校验失败：不保存、逐字段给可读提示，并自动展开出错的分组', async () => {
   const page = mountSettings({ settingsValue: undefined })
-  let view = page.view()
+  let view = page.open('prompt', 'model', 'params')
   view.inputs.get('customPromptEnabled').props.onChange({ target: { checked: true } })   // 开了开关但没写内容
   view.inputs.get('modelProvider').props.onChange({ target: { value: 'acme' } })          // 只填了 provider
   view.inputs.get('temperature').props.onChange({ target: { value: '9' } })               // 越界
@@ -1618,12 +1691,21 @@ await test('校验失败：不保存、逐字段给可读提示', async () => {
   ])
   assert.equal(after.noteText, 'settings.invalid')
   assert.equal(after.noteTone, 'error')
+
+  // 收起状态下的"错误提示在折叠区里"是这套布局最容易出的事故：新开一页、不展开任何分组，
+  // 直接改字段再保存，出错的分组必须被自动展开（否则用户看不到是哪一个字段错了）。
+  const fresh = mountSettings({ settingsValue: { modelProvider: 'acme' } })   // 只填 provider = 必然报错
+  fresh.open('model').inputs.get('modelId').props.onChange({ target: { value: '' } })
+  await fresh.view().action('save').props.onClick()
+  const expanded = fresh.view()
+  assert.equal(expanded.expands.get('model').props['aria-expanded'], true, '出错的分组必须自动展开')
+  assert.equal(expanded.errors.includes('settings.err.modelPair'), true)
 })
 await test('校验含上界（与宿主 validate 同值），超界在客户端就拦下', async () => {
   // 旧客户端镜像只查下界：填 700000 会先过预校验、再由宿主拒绝，而 mutate 静默失败
   // → 界面假报"已保存"。这里钉住上界必须在客户端也被拦住。
   const page = mountSettings({ settingsValue: undefined })
-  let view = page.view()
+  let view = page.open('params')
   view.inputs.get('timeoutMs').props.onChange({ target: { value: '700000' } })            // 超过 600000
   view.inputs.get('maxOutputTokens').props.onChange({ target: { value: '200001' } })      // 超过 200000
   view = page.view()
@@ -1640,7 +1722,7 @@ await test('宿主拒绝写入时**不得**假报已保存（mutate 不会 rejec
     settingsValue: { systemPrompt: '旧' },
     mutateRefuse: true,
   })
-  const view = page.view()
+  const view = page.open('prompt')
   view.inputs.get('systemPrompt').props.onChange({ target: { value: '新' } })
   await page.view().action('save').props.onClick()
 
@@ -1668,50 +1750,69 @@ await test('装配错误（真 reject）时把错误消息带出来', async () =
     settingsValue: { systemPrompt: '旧' },
     mutateFail: new Error('settings scope is not mounted'),
   })
-  const view = page.view()
+  const view = page.open('prompt')
   view.inputs.get('systemPrompt').props.onChange({ target: { value: '新' } })
   await page.view().action('save').props.onClick()
   const note = page.view().noteText
   assert.equal(note.includes('settings.saveFailed'), true)
   assert.equal(note.includes('settings scope is not mounted'), true)
 })
-await test('恢复默认：对所有字段发 unset，回到默认与组合配置', async () => {
+await test('恢复默认配置：对所有字段发 unset（含追加提示词），回到默认与组合配置', async () => {
   const page = mountSettings({
-    settingsValue: { customPromptEnabled: true, systemPrompt: 'x', modelProvider: 'acme', modelId: 'm1' },
+    settingsValue: {
+      customPromptEnabled: true,
+      systemPrompt: 'x',
+      modelProvider: 'acme',
+      modelId: 'm1',
+      promptProfiles: [{ id: 'p1', name: '周报', prompt: '稿' }],
+      activeProfileId: 'p1',
+    },
   })
   await page.view().action('reset').props.onClick()
   assert.equal(page.scope.mutations.length, 1)
   const { ops } = page.scope.mutations[0]
-  // 7 个通用字段 + 每个优化风格 1 个提示词字段（重置必须连风格提示词一起清掉，
-  // 否则"恢复默认"会留下一个改不掉的风格提示词）。
-  assert.equal(ops.length, 7 + HOST_STYLE_IDS.length)
+  // 9 个通用字段（含追加提示词列表与启用 id）+ 每个优化风格 1 个提示词字段。重置必须连追加提示词一起清掉，
+  // 否则"恢复默认配置"会留下改不掉的追加提示词。
+  assert.equal(ops.length, 9 + HOST_STYLE_IDS.length)
   assert.equal(ops.every(op => op.op === 'unset'), true)
   assert.deepEqual(ops.map(op => op.path[0]).sort(), [
     'customPromptEnabled', 'maxOutputTokens', 'modelId', 'modelProvider', 'systemPrompt', 'temperature', 'timeoutMs',
+    'promptProfiles', 'activeProfileId',
     ...HOST_STYLE_FIELDS,
   ].sort())
   assert.equal(page.view().noteText, 'settings.resetDone')
 })
-console.log('client half: 每个优化风格的独立提示词（P6.2）')
-await test('设置页为每个风格渲染独立提示词框，并标出当前生效来源', async () => {
+console.log('client half: 内置清单行（P8：精简/转规格并入追加提示词）')
+await test('内置追加提示词以内置行渲染在追加提示词清单最前：可编辑、可启用，但没有删除按钮和名称框', async () => {
   const page = mountSettings({
-    styles: [
-      { id: 'concise', label: '精简', source: 'config' },
-      { id: 'spec', label: '转规格', source: 'default' },
+    profiles: [
+      { id: 'concise', name: '精简', source: 'config', builtIn: true },
+      { id: 'spec', name: '转规格', source: 'default', builtIn: true },
     ],
-    settingsValue: { stylePromptConcise: '我的压缩要求' },
+    settingsValue: {},
   })
   page.view()
-  await tick()                        // 等 /catalog 落地（风格清单与生效来源都要宿主下发）
-  const view = page.view()
-  const concise = view.inputs.get('stylePromptConcise')
-  const spec = view.inputs.get('stylePromptSpec')
-  assert.ok(concise !== undefined, '「精简」必须有独立提示词输入框')
-  assert.ok(spec !== undefined, '「转规格」必须有独立提示词输入框')
-  assert.equal(concise.props.value, '我的压缩要求', '有用户值时回显用户自己的值')
-  assert.equal(spec.props.value, '', '没配的风格留空（宿主侧提示词正文不下发）')
+  await tick()                        // 等 /catalog 落地（来源标注由宿主下发）
+  // 清单行常驻（单选 + 名称 + 摘要），点「编辑」才出现它自己的输入框。
+  const closed = page.view()
+  assert.deepEqual(
+    [...closed.profileActive.keys()],
+    ['', 'concise', 'spec'],
+    '清单由「不追加」+ 两个内置条目组成',
+  )
+  const view = page.open('profile:concise', 'profile:spec')
+  // 内置行的提示词框：空 = 回落到"默认链 + 追加要求"，所以显示为空并带专门 placeholder。
+  const concise = view.inputs.get('profilePrompt:concise')
+  const spec = view.inputs.get('profilePrompt:spec')
+  assert.ok(concise !== undefined, '「精简」必须以内置清单行出现')
+  assert.ok(spec !== undefined, '「转规格」必须以内置清单行出现')
+  assert.equal(concise.props.value, '')
   assert.equal(concise.props.disabled, false)
-  // 生效来源用词典标签渲染，让用户知道"空着的时候用的是哪一层"。
+  // 内置行没有名称输入框（名称固定），也没有删除按钮。
+  assert.ok(view.inputs.get(`profileName:concise`) === undefined, '内置名称固定，不提供名称框')
+  const deleteButtons = view.buttons.filter(button => String(button.props['data-dsh-bi-action'] ?? '').startsWith('delete-profile:concise'))
+  assert.equal(deleteButtons.length, 0, '内置追加提示词不可删除')
+  // 行上标出"追加要求的当前来源"（宿主下发）。
   const hints = []
   const walk = (element) => {
     if (element === null || typeof element !== 'object') return
@@ -1724,40 +1825,230 @@ await test('设置页为每个风格渲染独立提示词框，并标出当前�
   assert.equal(hints.some(text => String(text).includes('settings.source.config')), true, '要标出组合层来源')
   assert.equal(hints.some(text => String(text).includes('settings.source.default')), true, '要标出内置默认来源')
 })
-await test('逐风格提示词保存：只发变化的那个字段，清空发 unset', async () => {
+await test('编辑内置追加提示词保存：存储整体替换条目（名称取词典固定值），只发变化的部分', async () => {
+  const page = mountSettings({ settingsValue: {} })
+  let view = page.open('profile:concise')
+  view.inputs.get('profilePrompt:concise').props.onChange({ target: { value: '我自己的精简全文' } })
+  await page.view().action('save').props.onClick()
+  assert.equal(page.scope.mutations.length, 1)
+  // 内置覆盖不带 name 字段：显示名由宿主按内置标签补齐，不把随界面语言变化的文本写进存储。
+  assert.deepEqual(page.scope.mutations[0].ops, [
+    { op: 'set', path: ['promptProfiles'], value: [{ id: 'concise', prompt: '我自己的精简全文' }] },
+  ])
+  assert.equal(page.view().noteText, 'settings.saved')
+
+  // 清空 = 放弃覆盖：存储条目被丢弃（整表 set 不再包含它），回落到内置追加文案。
+  page.view().inputs.get('profilePrompt:concise').props.onChange({ target: { value: '   ' } })
+  await page.view().action('save').props.onClick()
+  assert.deepEqual(page.scope.mutations[1].ops, [{ op: 'unset', path: ['promptProfiles'] }])
+})
+await test('用户条目与内置覆盖可以共存：一次保存发出整张表', async () => {
   const page = mountSettings({
-    styles: [{ id: 'concise', label: '精简', source: 'default' }, { id: 'spec', label: '转规格', source: 'default' }],
-    settingsValue: { stylePromptConcise: '旧值' },
+    settingsValue: {
+      promptProfiles: [
+        { id: 'concise', name: '精简', prompt: '内置覆盖' },
+        { id: 'weekly', name: '周报', prompt: '周报正文' },
+      ],
+      activeProfileId: 'weekly',
+    },
   })
-  page.view().inputs.get('stylePromptConcise').props.onChange({ target: { value: '新值' } })
+  let view = page.open('profile:concise')
+  // 内置行回显已存储的覆盖值；启用单选回显 'weekly'。
+  assert.equal(view.inputs.get('profilePrompt:concise').props.value, '内置覆盖')
+  assert.equal(view.profileActive.get('weekly').props.checked, true)
+  // 新增一条（清单行立即出现，输入框要展开那行才有）再保存：整表一起发。
+  view.action('add-profile').props.onClick()
+  const newId = [...page.view().profileActive.keys()].find(key => key.startsWith('bi-p-'))
+  assert.ok(newId !== undefined, '新增的清单行必须出现（id 以 bi-p- 开头）')
+  view = page.open(`profile:${newId}`)
+  view.inputs.get(`profileName:${newId}`).props.onChange({ target: { value: '待办' } })
+  view.inputs.get(`profilePrompt:${newId}`).props.onChange({ target: { value: '待办正文' } })
+  await page.view().action('save').props.onClick()
+  const { ops } = page.scope.mutations[0]
+  const profilesOp = ops.find(op => op.path[0] === 'promptProfiles')
+  assert.deepEqual(profilesOp, {
+    op: 'set',
+    path: ['promptProfiles'],
+    value: [
+      { id: 'concise', prompt: '内置覆盖' },
+      { id: 'weekly', name: '周报', prompt: '周报正文' },
+      { id: newId, name: '待办', prompt: '待办正文' },
+    ],
+  })
+  // activeProfileId 指向仍存在的 weekly：不需要改动。
+  assert.equal(ops.some(op => op.path[0] === 'activeProfileId'), false)
+})
+
+console.log('client half: 系统提示词可见 + 追加提示词（设置页）')
+await test('默认提示词可查看、可一键填入编辑框（目录下发的 defaults.systemPrompt）', async () => {
+  const page = mountSettings({ settingsValue: {} })
+  // 目录没到之前没有正文可显示，「查看」按钮应禁用而不是点了没反应。
+  assert.equal(page.open('prompt').action('toggle-default').props.disabled, true)
+  await tick()
+  let view = page.open('prompt')
+  assert.equal(view.action('toggle-default').props.disabled, false)
+  assert.equal(view.defaultPromptText, null, '默认收起，不占版面')
+
+  view.action('toggle-default').props.onClick()
+  view = page.view()
+  assert.equal(view.defaultPromptText, '默认提示词全文', '展开后能看到宿主下发的默认正文')
+
+  // 「以默认为基础编辑」：填入正文并自动启用自定义系统提示词（只填不用会让人以为生效了）。
+  view.action('use-default').props.onClick()
+  view = page.view()
+  assert.equal(view.inputs.get('systemPrompt').props.value, '默认提示词全文')
+  assert.equal(view.inputs.get('customPromptEnabled').props.checked, true)
+})
+await test('已保存的追加提示词会回填：名称/提示词/启用单选都渲染出来', () => {
+  const page = mountSettings({
+    settingsValue: {
+      promptProfiles: [
+        { id: 'p1', name: '周报', prompt: '你是周报写手' },
+        { id: 'p2', name: '待办', prompt: '你是待办助手' },
+      ],
+      activeProfileId: 'p2',
+    },
+  })
+  // 单选与摘要常驻可见；输入框要展开对应行才有。
+  const closed = page.view()
+  assert.equal(closed.profileActive.get('p2').props.checked, true, '启用中的追加提示词单选要回显')
+  assert.equal(closed.profileActive.get('p1').props.checked, false)
+  assert.equal(closed.profileActive.get('').props.checked, false, '「不追加」选项存在且未选中')
+  assert.equal(closed.inputs.size, 0, '未展开时不该有输入框')
+
+  const view = page.open('profile:p1', 'profile:p2')
+  assert.equal(view.inputs.get('profileName:p1').props.value, '周报')
+  assert.equal(view.inputs.get('profilePrompt:p1').props.value, '你是周报写手')
+  assert.equal(view.inputs.get('profilePrompt:p2').props.value, '你是待办助手')
+})
+await test('新增追加提示词：清单行立即出现；展开后填好，保存发出整个 promptProfiles 数组（一次 set）', async () => {
+  const page = mountSettings({ settingsValue: {} })
+  let view = page.view()
+  view.action('add-profile').props.onClick()
+  const id = [...page.view().profileActive.keys()].find(key => key.startsWith('bi-p-'))
+  assert.ok(id !== undefined, '新增后清单行必须立即出现（id 以 bi-p- 开头）')
+  assert.equal(page.view().inputs.size, 0, '新行默认只有一行摘要，输入框要展开才出现')
+  view = page.open(`profile:${id}`)
+  view.inputs.get(`profileName:${id}`).props.onChange({ target: { value: '  周报 ' } })
+  view.inputs.get(`profilePrompt:${id}`).props.onChange({ target: { value: '你是周报写手' } })
   await page.view().action('save').props.onClick()
 
   assert.equal(page.scope.mutations.length, 1)
-  // 只发改动过的那个风格字段：另一个既没配也没改，不该出现在 ops 里。
-  assert.deepEqual(page.scope.mutations[0].ops, [
-    { op: 'set', path: ['stylePromptConcise'], value: '新值' },
+  const { ops } = page.scope.mutations[0]
+  // 名称要 trim；整个列表作为**一个字段**原子提交（数组在设置通道里是合法值）。
+  assert.deepEqual(ops, [
+    { op: 'set', path: ['promptProfiles'], value: [{ id, name: '周报', prompt: '你是周报写手' }] },
   ])
   assert.equal(page.view().noteText, 'settings.saved')
-  // 保存后镜像里的值就是新值（opsApplied 自查通过，不是假报成功）。
-  assert.equal(page.scope.getSnapshot().value.stylePromptConcise, '新值')
-
-  // 清空 → unset（回落到组合配置/内置默认）。
-  page.view().inputs.get('stylePromptConcise').props.onChange({ target: { value: '  ' } })
-  await page.view().action('save').props.onClick()
-  assert.deepEqual(page.scope.mutations[1].ops, [{ op: 'unset', path: ['stylePromptConcise'] }])
-  assert.equal(page.scope.getSnapshot().value.stylePromptConcise, undefined)
 })
-await test('宿主没给风格清单（离线/旧宿主）时，表单仍可按镜像 id 渲染并保存', async () => {
-  const page = mountSettings({ styles: [], settingsValue: {} })
-  const view = page.view()
-  // 离线时标签退回词典（style.concise / style.spec），字段名不变——保存链路不受影响。
-  assert.ok(view.inputs.get('stylePromptConcise') !== undefined)
-  assert.ok(view.inputs.get('stylePromptSpec') !== undefined)
-  view.inputs.get('stylePromptSpec').props.onChange({ target: { value: '离线填的' } })
+await test('全空的清单行保存时被丢弃：不报错、也不存出空追加提示词', async () => {
+  const page = mountSettings({ settingsValue: {} })
+  page.view().action('add-profile').props.onClick()
+  await page.view().action('save').props.onClick()
+  assert.equal(page.scope.mutations.length, 0, '整行全空 = 没有可保存的改动')
+  assert.equal(page.view().noteText, 'settings.noChange')
+})
+await test('校验：填了一半的追加提示词（缺名称或缺提示词）在客户端就拦下', async () => {
+  const page = mountSettings({ settingsValue: {} })
+  page.view().action('add-profile').props.onClick()
+  const id = [...page.view().profileActive.keys()].find(key => key.startsWith('bi-p-'))
+  const view = page.open(`profile:${id}`)
+  view.inputs.get(`profileName:${id}`).props.onChange({ target: { value: '只有名字' } })
+  await page.view().action('save').props.onClick()
+
+  assert.equal(page.scope.mutations.length, 0, '校验不过绝不能写')
+  const after = page.view()
+  assert.deepEqual(after.errors, ['settings.err.profilePrompt'])
+  assert.equal(after.noteText, 'settings.invalid')
+})
+await test('在追加提示词间切换：只发 activeProfileId 一个 set', async () => {
+  const page = mountSettings({
+    settingsValue: {
+      promptProfiles: [
+        { id: 'p1', name: 'A', prompt: 'P1' },
+        { id: 'p2', name: 'B', prompt: 'P2' },
+      ],
+      activeProfileId: 'p1',
+    },
+  })
+  page.view().profileActive.get('p2').props.onChange()
   await page.view().action('save').props.onClick()
   assert.deepEqual(page.scope.mutations[0].ops, [
-    { op: 'set', path: ['stylePromptSpec'], value: '离线填的' },
+    { op: 'set', path: ['activeProfileId'], value: 'p2' },
   ])
+})
+await test('删除启用中的追加提示词：activeProfileId 一并退回默认（unset）', async () => {
+  const page = mountSettings({
+    settingsValue: {
+      promptProfiles: [{ id: 'p1', name: '周报', prompt: '稿子' }],
+      activeProfileId: 'p1',
+    },
+  })
+  let view = page.view()
+  view.action('delete-profile:p1').props.onClick()
+  view = page.view()
+  assert.equal(view.profileActive.get('').props.checked, true, '删除后退回「默认」')
+  await view.action('save').props.onClick()
+  assert.deepEqual(page.scope.mutations[0].ops, [
+    { op: 'unset', path: ['promptProfiles'] },
+    { op: 'unset', path: ['activeProfileId'] },
+  ])
+})
+await test('宿主拒绝追加提示词写入时不假报成功（opsApplied 对数组做深比较）', async () => {
+  const page = mountSettings({
+    settingsValue: { promptProfiles: [{ id: 'p1', name: '旧', prompt: '旧稿' }] },
+    mutateRefuse: true,
+  })
+  const view = page.open('profile:p1')
+  view.inputs.get('profilePrompt:p1').props.onChange({ target: { value: '新稿' } })
+  await page.view().action('save').props.onClick()
+
+  assert.equal(page.scope.mutations.length, 1, '确实发起了写入')
+  const after = page.view()
+  assert.equal(after.noteTone, 'error')
+  assert.equal(after.noteText.includes('settings.saved'), false, '数组写失败绝不能报"已保存"')
+})
+
+console.log('client half: 追加提示词切换（输入框旁 ▾ 菜单）')
+await test('用户自定义追加提示词排在内置种子之后；点选后落盘 activeProfileId 并移动选中标记', async () => {
+  installFetch({
+    profiles: [
+      { id: 'concise', name: '精简', source: 'default', builtIn: true },
+      { id: 'spec', name: '转规格', source: 'default', builtIn: true },
+      { id: 'weekly', name: '周报', source: 'settings', builtIn: false },
+      { id: 'todo', name: '待办', source: 'settings', builtIn: false },
+    ],
+    activeProfileId: 'weekly',
+  })
+  const harness = mount({ draft: '帮我写个脚本' })
+  harness.view()
+  await tick()
+  await harness.view().presetToggle.props.onClick()
+  let view = harness.view()
+  assert.deepEqual(
+    view.profileItems.map(item => item.props['data-dsh-better-input-profile']),
+    ['', 'concise', 'spec', 'weekly', 'todo'],
+    '「默认」在最前，内置种子随后，用户条目按宿主顺序排最后',
+  )
+  assert.equal(view.profileItems[3].props['data-active'], true, '宿主标了启用中的追加提示词要回显')
+
+  // 点「待办」：乐观更新选中标记；写入成功（假 scope 落盘）后提示 ok。
+  await view.profileItems[4].props.onClick()
+  await tick()
+  view = harness.view()
+  assert.deepEqual(harness.scope.mutations, [{
+    ops: [{ op: 'set', path: ['activeProfileId'], value: 'todo' }],
+    revision: 7,
+  }])
+  assert.equal(view.profileItems[4].props['data-active'], true)
+  assert.equal(view.profileItems[3].props['data-active'], false)
+  assert.equal(view.menuOpen, true, '切换不收起菜单')
+  assert.equal(view.noteTone, 'ok')
+
+  // 切回「默认」：发 unset。
+  await view.profileItems[0].props.onClick()
+  await tick()
+  assert.deepEqual(harness.scope.mutations[1].ops, [{ op: 'unset', path: ['activeProfileId'] }])
 })
 
 console.log('client half: 打开插件配置文件（P6.3）')
@@ -1812,13 +2103,14 @@ await test('设置页展示配置文件路径（便于手动编辑/复制）', a
 
 await test('远端提交后（未在编辑）表单会同步成新值', async () => {
   const page = mountSettings({ settingsValue: { systemPrompt: '旧值' } })
-  assert.equal(page.view().inputs.get('systemPrompt').props.value, '旧值')
+  assert.equal(page.open('prompt').inputs.get('systemPrompt').props.value, '旧值')
   page.scope.publish({ value: { systemPrompt: '远端改了' } })
   assert.equal(page.view().inputs.get('systemPrompt').props.value, '远端改了')
 })
 await test('可写性/可用性两态都有明确说明', () => {
   const readOnly = mountSettings({ settingsValue: {}, writable: false })
-  const readOnlyView = readOnly.view()
+  // 只读时依然可以展开查看（输入控件是 disabled，不是藏起来）。
+  const readOnlyView = readOnly.open('prompt')
   assert.equal(readOnlyView.action('save').props.disabled, true)
   assert.equal(readOnlyView.inputs.get('systemPrompt').props.disabled, true)
   assert.equal(readOnlyView.notes.some(note => childrenOf(note)[0] === 'settings.readonly'), true)
@@ -1864,7 +2156,7 @@ await test('不可用态要把宿主侧的原因一并显示（否则无从排�
 })
 await test('模型目录：切 provider 会去拉该 provider 的模型，失败只提示不阻断', async () => {
   const page = mountSettings({ models: [{ id: 'm9', name: 'M9' }] })
-  let view = page.view()
+  let view = page.open('model')
   view.inputs.get('modelProvider').props.onChange({ target: { value: 'acme' } })
   view = page.view()   // 依赖变化 → 触发拉取（异步）
   await tick()
@@ -1878,13 +2170,13 @@ await test('模型目录：切 provider 会去拉该 provider 的模型，失败
   const broken = mountSettings({ failCatalog: true })
   broken.view()
   await tick()                 // 目录失败是异步落地
-  const brokenView = broken.view()
+  const brokenView = broken.open('model')
   assert.equal(brokenView.errors.includes('settings.err.loadCatalog'), true, '目录失败要提示且可手填')
   assert.equal(brokenView.inputs.get('modelId').props.disabled, false, '手填仍然可用')
 })
 await test('测试按钮：走宿主试调路由，成功失败都有可读结论', async () => {
   const okPage = mountSettings({ settingsValue: { modelProvider: 'acme', modelId: 'm1' } })
-  await okPage.view().action('test').props.onClick()
+  await okPage.open('model').action('test').props.onClick()
   const checkCall = okPage.network.calls.find(call => call.url === ROUTE_CHECK)
   assert.deepEqual(checkCall.body, { provider: 'acme', model: 'm1' })
   assert.equal(okPage.view().noteText.includes('settings.model.testOk'), true)
@@ -1893,14 +2185,14 @@ await test('测试按钮：走宿主试调路由，成功失败都有可读结�
     settingsValue: { modelProvider: 'acme', modelId: 'nope' },
     check: { ok: false, message: 'unknown model' },
   })
-  await badPage.view().action('test').props.onClick()
+  await badPage.open('model').action('test').props.onClick()
   const badNote = badPage.view().noteText
   assert.equal(badNote.includes('settings.model.testFail'), true)
   assert.equal(badNote.includes('unknown model'), true)
   assert.equal(badPage.view().noteTone, 'error')
 
   const missingPage = mountSettings({ settingsValue: {} })
-  await missingPage.view().action('test').props.onClick()
+  await missingPage.open('model').action('test').props.onClick()
   assert.equal(missingPage.network.calls.some(call => call.url === ROUTE_CHECK), false, '缺字段不该发请求')
   assert.equal(missingPage.view().noteText, 'settings.err.modelPair')
 })

@@ -291,6 +291,78 @@ await test('逐风格提示词：保存 → 生效来源变 settings → 下一�
   }
 })
 
+await test('追加提示词：保存 → catalog 可见 → 切换后下一次请求的 system 真的换（真框架全链路）', async () => {
+  const host = await boot({
+    settings: 'after',
+    // 固定模型路由，否则 /optimize 会先以 502 no-model-route 结束，走不到 LLM。
+    config: { systemPrompt: 'BASE', model: { provider: 'p', model: 'm' } },
+  })
+  try {
+    // 走真实 settings 服务的写入通道（与客户端 mutate 落到的同一层）：两条追加提示词，启用其中之一。
+    await host.ctx.settings.update(SETTINGS_NAMESPACE, {
+      promptProfiles: [
+        { id: 'weekly', name: '周报模式', prompt: '你是周报写手' },
+        { id: 'todo', name: '待办模式', prompt: '你是待办助手' },
+      ],
+      activeProfileId: 'weekly',
+    })
+    await settle(30)
+    assert.equal(
+      readFileSync(host.documentPath, 'utf8').includes('你是周报写手'),
+      true,
+      '追加提示词列表（含正文）必须真的落进设置文档',
+    )
+
+    // catalog 必须如实反映：内置种子在前，用户条目在后（行只含 id/名称/来源/是否内置）。
+    const catalog = await drive(host.routes, ROUTE_CATALOG, 'GET')
+    assert.deepEqual(catalog.json.profiles, [
+      { id: 'concise', name: '精简', source: 'default', builtIn: true },
+      { id: 'spec', name: '转规格', source: 'default', builtIn: true },
+      { id: 'weekly', name: '周报模式', source: 'settings', builtIn: false },
+      { id: 'todo', name: '待办模式', source: 'settings', builtIn: false },
+    ])
+    assert.equal(catalog.json.effective.profileId, 'weekly')
+    // 基底来源如实标注：追加提示词不改系统提示词，所以这里仍是组合配置。
+    assert.equal(catalog.json.effective.sources.prompt, 'config')
+    // 清单行绝不带正文（正文是用户自己的设置值，走设置镜像，不走这份清单）。
+    assert.equal(catalog.json.profiles.some(profile => 'prompt' in profile), false)
+
+    // 关键一步：下一次请求的系统提示词 = 基底 + 启用中的那条追加（只增不改）。
+    const optimized = await drive(host.routes, ROUTE, 'POST', { text: '写个脚本' })
+    assert.equal(optimized.status, 200)
+    assert.equal(host.calls[host.calls.length - 1].system, 'BASE\n\n本次额外要求（周报模式）：你是周报写手')
+
+    // 切换追加提示词 = 改一个字段（输入框旁 ▾ 菜单落盘的正是这条 op），下一次请求即换。
+    await host.ctx.settings.mutate(SETTINGS_NAMESPACE, [{ op: 'set', path: ['activeProfileId'], value: 'todo' }])
+    await settle(30)
+    await drive(host.routes, ROUTE, 'POST', { text: '写个脚本' })
+    assert.equal(host.calls[host.calls.length - 1].system, 'BASE\n\n本次额外要求（待办模式）：你是待办助手')
+
+    // 切到**内置追加提示词**（没有存储条目也合法）：system = 组合层 BASE + 内置追加要求，与旧多选逐字节一致。
+    await host.ctx.settings.mutate(SETTINGS_NAMESPACE, [{ op: 'set', path: ['activeProfileId'], value: 'concise' }])
+    await settle(30)
+    await drive(host.routes, ROUTE, 'POST', { text: '写个脚本' })
+    assert.equal(
+      host.calls[host.calls.length - 1].system,
+      'BASE\n\n本次额外要求（精简）：在保留全部约束的前提下压缩篇幅，去掉客套与重复表述。',
+    )
+    const builtinCatalog = await drive(host.routes, ROUTE_CATALOG, 'GET')
+    assert.equal(builtinCatalog.json.effective.profileId, 'concise')
+    assert.equal(builtinCatalog.json.profiles.find(profile => profile.id === 'concise').source, 'default')
+
+    // 切回默认（unset）：回落到组合配置的 BASE。
+    await host.ctx.settings.mutate(SETTINGS_NAMESPACE, [{ op: 'unset', path: ['activeProfileId'] }])
+    await settle(30)
+    await drive(host.routes, ROUTE, 'POST', { text: '写个脚本' })
+    assert.equal(host.calls[host.calls.length - 1].system, 'BASE')
+    const after = await drive(host.routes, ROUTE_CATALOG, 'GET')
+    assert.equal(after.json.effective.profileId, null)
+    assert.equal(after.json.effective.sources.prompt, 'config')
+  } finally {
+    await host.dispose()
+  }
+})
+
 await test('完全没有设置提供者 → 插件照常挂载，只是 settings.available=false', async () => {
   const host = await boot({ settings: 'never' })
   try {

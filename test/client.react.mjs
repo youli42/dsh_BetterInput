@@ -223,7 +223,7 @@ test('草稿含芯片（occurrences 非空）仍能渲染（拦截发生在点�
 
 console.log('react: 设置页（真 React 渲染）')
 
-test('可用态渲染出完整表单（字段、动作、生效来源）', () => {
+test('可用态渲染出紧凑分组（默认不含输入框，只有摘要与「编辑」开关）', () => {
   const { settings } = mount()
   const { html, complaints } = renderStrict(() =>
     renderToStaticMarkup(
@@ -239,21 +239,23 @@ test('可用态渲染出完整表单（字段、动作、生效来源）', () =>
     ),
   )
   assert.equal(html.includes('data-dsh-bi-settings="ready"'), true)
-  for (const field of [
-    'customPromptEnabled',
-    'systemPrompt',
-    'modelProvider',
-    'modelId',
-    'temperature',
-    'maxOutputTokens',
-    'timeoutMs',
-  ]) {
-    assert.equal(html.includes(`data-dsh-bi-field="${field}"`), true, `缺少字段 ${field}`)
+  // P10 验收 1：默认（SSR 就是初始态）不渲染任何输入控件，只有摘要与「编辑」开关。
+  for (const field of ['customPromptEnabled', 'systemPrompt', 'modelProvider', 'modelId', 'temperature']) {
+    assert.equal(html.includes(`data-dsh-bi-field="${field}"`), false, `默认不该渲染输入框 ${field}`)
   }
-  for (const action of ['save', 'test', 'reset']) {
+  for (const key of ['prompt', 'model', 'params']) {
+    assert.equal(html.includes(`data-dsh-bi-expand="${key}"`), true, `缺少分组「编辑」开关 ${key}`)
+  }
+  assert.equal(html.includes('data-dsh-bi-badge="model"'), true, '模型分组要有摘要')
+  assert.equal(html.includes('data-dsh-bi-badge="params"'), true, '参数分组要有摘要')
+  // 追加提示词清单常驻（选择不是输入）：三个单选一直都在。
+  for (const id of ['', 'concise', 'spec']) {
+    assert.equal(html.includes(`data-dsh-bi-profile-active="${id}"`), true, `清单缺少条目 ${id}`)
+  }
+  // 操作条常驻，不必滚到底部找按钮。
+  for (const action of ['save', 'reset', 'open-config', 'add-profile']) {
     assert.equal(html.includes(`data-dsh-bi-action="${action}"`), true, `缺少动作 ${action}`)
   }
-  assert.equal(html.includes('for="dsh-bi-prompt"'), true, '提示词 textarea 必须有可访问名')
   assert.deepEqual(complaints, [])
 })
 

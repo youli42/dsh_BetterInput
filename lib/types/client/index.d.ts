@@ -51,6 +51,9 @@ export interface BetterInputState {
  *   仅存活于插件生命周期（不进 React state，避免重挂载丢栈）。
  * - 草稿含芯片（`occurrences` 非空）或输入机非 `plain` 时拒绝发起。
  *   （`occurrences` 只覆盖 `@引用` 芯片；`/命令` 是纯文本，不在其中。）
+ * - ▾ 菜单两个区块：追加提示词（**单选**，含内置种子「精简/转规格」；点击把 `activeProfileId`
+ *   写进设置并落盘，被选中的那条会接在系统提示词之后，下一次优化生效）→ 预设（单次，请求带 `presetId`）。
+ *   旧版浏览器半的「多选风格 + styleIds」已并入追加提示词；宿主仍兼容旧客户端的 styleIds 请求。
  */
 export interface BetterInputBehavior {
   /** 宿主路由。 */
@@ -121,8 +124,12 @@ export interface BetterInputSettingsInjected {
       providers?: Array<{ id: string, name: string }>
       /** 设置命名空间状态：`available=false` 时 `reason` 是宿主侧原因（注册失败消息），用于排查。 */
       settings?: { available?: boolean, reason?: string, section?: Record<string, unknown> }
-      /** 内置优化风格：只有 id/label/**生效来源**，提示词正文留在宿主。 */
+      /** 内置优化风格：只有 id/label/**生效来源**，提示词正文留在宿主（旧版浏览器半的兼容面）。 */
       styles?: Array<{ id: string, label?: string, source?: 'settings' | 'config' | 'default' }>
+      /** 追加提示词行（内置种子在前）：只有 id/名称/来源/是否内置，正文留在宿主。 */
+      profiles?: Array<{ id: string, name: string, source?: string, builtIn?: boolean }>
+      /** 内置/组合层的默认系统提示词：设置页要"可见可编辑"，这一段有意下发。 */
+      defaults?: { systemPrompt?: string }
       /** 插件配置文件的绝对路径（宿主按自己的模块位置解析），给「打开配置文件」用。 */
       configPath?: string
       effective?: Record<string, unknown>
