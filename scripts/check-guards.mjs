@@ -140,6 +140,35 @@ const checks = [
     file: 'lib/client.js',
     must: /scope\.mutate\(\[op\]/,
   },
+  {
+    why: '思考增量（reasoning-delta）必须与 showReasoning 出现在同一行：把它无条件转发出去，'
+      + '设置页那个"不显示思考过程"就成了"发了再藏起来"——思考正文（模型的推理内容）会离开宿主，'
+      + '本机其它进程或 LAN 客户端都能看到（P11 的语义是"不发"）',
+    file: 'lib/index.js',
+    must: /reasoning-delta'[^\n]*showReasoning|showReasoning[^\n]*reasoning-delta'/,
+  },
+  {
+    why: '权威文本必须只由 text 块装配（`.filter(block => block.type === \'text\')`）：'
+      + '客户端以 done 的 text 为准写回草稿，一旦思考块混进装配结果，模型的推理内容就会被'
+      + '写进用户的输入框（并且还压进撤销栈）',
+    file: 'lib/index.js',
+    must: /\.filter\(block => block\.type === 'text'\)/,
+  },
+  {
+    why: '思考文本只能走展示状态，绝不允许作为草稿写回（setDraft(thinking…)）：'
+      + '整体替换草稿是"用户输入"的语义，思考内容一旦写进去，用户下次提交就会把模型的推理当自己的话发出去',
+    file: 'lib/client.js',
+    forbid: /setDraft\(\s*(?:thinking|thinkingText)\b/,
+    must: /setThinking\(/,
+  },
+  {
+    why: '▾ 菜单的显示条件必须把「本次调用」分区算进去（P12）：撤销与思考回看都住在这个菜单里，'
+      + '条件若只由 /catalog 的 profiles/presets 决定，目录读取失败（离线、宿主半缺失）时整个菜单会消失'
+      + '——一次成功的优化之后就再也找不到撤销入口，而主按钮看起来一切正常',
+    file: 'lib/client.js',
+    forbid: /if \(profiles\.length > 0 \|\| oneShotPresets\.length > 0\)/,
+    must: /hasInvocation/,
+  },
 ]
 
 /** 客户端不许出现"与宿主同值"的区间字面量（只允许兜底常量里出现）。 */

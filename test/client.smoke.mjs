@@ -103,6 +103,40 @@ const appendedStyles = []
 let entry
 
 /**
+ * 登记中的 interval 回调（P11 的进度计时器）。
+ *
+ * 手工推进而不是真的等时间：默认的 `view()` 只刷新快照，时间推进必须由用例显式驱动，
+ * 否则用例的成败会挂在"这一轮跑得快不快"上。
+ */
+const intervals = new Map()
+let intervalSeq = 0
+
+/** 推进一次所有在跑的 interval（进度行的耗时就是这么来的）。 */
+function tickIntervals() {
+  for (const callback of [...intervals.values()]) callback()
+}
+
+/**
+ * 冻结时钟跑一段用例（P11）。
+ *
+ * 进度行带"已耗时"，思考面板的刷新走 100ms 节流——两者都读 `Date.now()`。
+ * 不钉住时钟，"2.4s"与"这一段会不会被节流吞掉"就只能靠运气，
+ * 而节流恰恰是这几条用例最该钉住的行为。
+ * @param {(clock: { advance: (ms: number) => void }) => Promise<void>} body - 用例体。
+ * @returns {Promise<void>} 完成。
+ */
+async function withClock(body) {
+  const realNow = Date.now
+  let value = 1_000_000
+  Date.now = () => value
+  try {
+    await body({ advance: (ms) => { value += ms } })
+  } finally {
+    Date.now = realNow
+  }
+}
+
+/**
  * document 上的监听器登记表。
  *
  * 必须是**真的**登记表（而不是空函数）：菜单"点外面关闭"和"点菜单内部不关"是两个真实分支，
@@ -127,6 +161,15 @@ function dispatchMouseDown(target) {
 globalThis.window = {
   setTimeout: () => 0,
   clearTimeout: () => {},
+  // 进度行的耗时来自本地计时器（P11）。替身把回调登记下来，由用例显式推进
+  // （`tickIntervals`）——不登记就永远走 `window.setInterval?.` 的短路分支，
+  // "计时器到底起没起"这件事会整个漏掉。
+  setInterval: (callback) => {
+    intervalSeq += 1
+    intervals.set(intervalSeq, callback)
+    return intervalSeq
+  },
+  clearInterval: (id) => { intervals.delete(id) },
   __ModuleLoader__: { load: (loaded) => { entry = loaded } },
 }
 globalThis.document = {
@@ -429,6 +472,11 @@ function installFetch(options = {}) {
         openStream()
         streamState.controller.enqueue(encoder.encode(`event: delta\ndata: ${JSON.stringify({ text })}\n\n`))
       },
+      /** 发一个思考增量（P11）：帧格式与 delta 同构，只是事件名不同。 */
+      reasoning(text) {
+        openStream()
+        streamState.controller.enqueue(encoder.encode(`event: reasoning\ndata: ${JSON.stringify({ text })}\n\n`))
+      },
       /** 发任意原始帧文本（用于测解析器容错，例如注释帧/坏 JSON）。 */
       raw(text) {
         openStream()
@@ -540,6 +588,10 @@ function mount(options = {}) {
   // 每次挂载都是新实例：hook 槽位必须清空，否则同一用例里第二次 mount 会读到上一个组件的状态。
   hookSlots.length = 0
   cursor = 0
+  // 真框架会在组件卸载时摘掉它的 document 监听；替身没有卸载语义，那些"已经死掉的组件"的监听
+  // 会跨用例累积（P12 起用例常以"菜单开着"结束，于是暴露出来）。挂载时清一次，等价于
+  // 模拟真框架的卸载——"菜单收起后监听器必须被摘掉"这条仍在本用例内被钉着，没有放水。
+  documentListeners.clear()
   const truth = {
     draft: options.draft ?? '帮我写个脚本',
     phase: options.phase ?? 'plain',
@@ -595,7 +647,17 @@ function mount(options = {}) {
     cursor = 0
     const node = component(props)
     const buttons = childrenOf(node).filter(child => child.type === 'button')
-    const note = childrenOf(node).find(child => child.type === 'span')
+    // 提示与进度**按 data 属性取**，不靠"第一个 span"：P11 起生成中那个槽位放的是进度行，
+    // 按位置取会让"生成中的 noteText" 变成进度文案——那是假证据。
+    const note = byProp(node, 'data-dsh-better-input-note')[0] ?? null
+    const progress = byProp(node, 'data-dsh-better-input-progress')[0] ?? null
+    const thinkingPanel = byProp(node, 'data-dsh-better-input-thinking')[0] ?? null
+    const thinkingBody = thinkingPanel === null
+      ? null
+      : byProp(thinkingPanel, 'data-dsh-better-input-thinking-body')[0] ?? null
+    const thinkingTitle = thinkingPanel === null
+      ? null
+      : byProp(thinkingPanel, 'data-dsh-better-input-thinking-title')[0] ?? null
     const presetToggle = byProp(node, 'data-dsh-better-input-preset-toggle')[0] ?? null
     const presetItems = byProp(node, 'data-dsh-better-input-preset')
     const menu = byProp(node, 'data-dsh-better-input-menu')[0] ?? null
@@ -603,8 +665,17 @@ function mount(options = {}) {
       node,
       props,
       optimize: buttons.find(button => button.props['data-dsh-better-input'] !== undefined),
-      undo: buttons.find(button => button.props['data-dsh-better-input-undo'] !== undefined) ?? null,
-      /** 预设菜单按钮（没配预设时为 null）。 */
+      /**
+       * 撤销项（P12 起是**菜单项**，不是工具行里的按钮）：只在菜单展开时才存在。
+       * 用 byProp 递归找——它嵌在菜单 div 里，不在 wrap 的直接子节点上。
+       */
+      undo: byProp(node, 'data-dsh-better-input-undo')[0] ?? null,
+      /** 撤销项当前显示的文案（菜单项文案本身就是状态提示，P12）。 */
+      get undoLabel() {
+        const item = byProp(node, 'data-dsh-better-input-undo')[0]
+        return item === undefined ? null : childrenOf(item)[0]
+      },
+      /** ▾ 菜单按钮（工具行里除 ✦ 之外唯一的常驻控件；没有任何可选项时为 null）。 */
       presetToggle,
       /** 菜单项（按渲染顺序）。 */
       presetItems,
@@ -615,8 +686,24 @@ function mount(options = {}) {
       /** 菜单是否展开（由 DOM 推导，而不是读组件内部 state）。 */
       menuOpen: menu !== null,
       /** 提示正文（无提示时为 null）。 */
-      get noteText() { return note === undefined ? null : childrenOf(note)[0] },
-      get noteTone() { return note === undefined ? null : note.props['data-tone'] },
+      get noteText() { return note === null ? null : childrenOf(note)[0] },
+      get noteTone() { return note === null ? null : note.props['data-tone'] },
+      /** 进度行（只在生成中渲染；`null` = 没在跑）。 */
+      progress,
+      /** 进度文案（含阶段词、耗时与计数）。 */
+      get progressText() { return progress === null ? null : childrenOf(progress)[0] },
+      /** 进度阶段（waiting / thinking / writing），取自 data 属性而不是文案。 */
+      get progressPhase() { return progress === null ? null : progress.props['data-dsh-better-input-progress'] },
+      /** 思考回看项（同样是菜单项：没有思考内容、或正在生成时为 null）。 */
+      thinkingToggle: byProp(node, 'data-dsh-better-input-thinking-toggle')[0] ?? null,
+      /** 思考面板（未展开时为 null）。 */
+      thinkingPanel,
+      /** 面板标题（「思考过程 · N 字」，生成中还带一段进度）。 */
+      get thinkingTitle() { return thinkingTitle === null ? null : childrenOf(thinkingTitle)[0] },
+      /** 面板正文（被截断时带一句说明）。 */
+      get thinkingText() { return thinkingBody === null ? null : childrenOf(thinkingBody)[0] },
+      /** 面板收起按钮。 */
+      thinkingClose: thinkingPanel === null ? null : byProp(thinkingPanel, 'data-dsh-better-input-thinking-close')[0] ?? null,
     }
   }
 
@@ -631,6 +718,30 @@ function mount(options = {}) {
     /** 改真值（模拟用户打字并被框架提交）。 */
     type(text) { truth.draft = text; truth.draftRev += 1 },
     setOccurrences(list) { truth.occurrences = list },
+    /**
+     * 打开 ▾ 菜单（P12）。
+     *
+     * 撤销与"查看思考过程"都搬进了菜单，所以用例碰它们的第一步永远是开菜单——
+     * 替身**不替用例偷偷开菜单**：那样"菜单渲染不出来"这类回归就永远看不见了。
+     * 已经是展开态时是空操作。
+     * @returns {Promise<object>} 展开后的视图。
+     */
+    async openMenu() {
+      const toggle = view().presetToggle
+      assert.ok(toggle !== null, '菜单按钮必须存在（有撤销/思考/追加提示词/预设中任意一项时）')
+      if (toggle.props['aria-expanded'] !== true) await toggle.props.onClick()
+      return view()
+    },
+    /**
+     * 在菜单里点一次撤销。
+     * @returns {Promise<object>} 点击后的视图（执行成功时菜单会随之收起）。
+     */
+    async clickUndo() {
+      const item = (await this.openMenu()).undo
+      assert.ok(item !== null, '菜单里必须有撤销项')
+      await item.props.onClick()
+      return view()
+    },
     view,
   }
 }
@@ -890,11 +1001,11 @@ await test('新版本形状（带 InputZone owner props）行为一致', async (
   network.respond({ data: { text: '优化后的草稿' } })
   await pending
   assert.deepEqual(harness.written, ['优化后的草稿'])
-  assert.notEqual(harness.view().undo, null)
+  assert.notEqual((await harness.openMenu()).undo, null)
 })
 
 console.log('client half: P2 接线')
-await test('成功路径：POST 到宿主路由并 setDraft，随后出现撤销按钮', async () => {
+await test('成功路径：POST 到宿主路由并 setDraft，随后可从菜单撤销（成功不再弹提示）', async () => {
   const network = installFetch()
   const harness = mount({ draft: '帮我写个脚本' })
   const pending = harness.view().optimize.props.onClick()
@@ -908,11 +1019,13 @@ await test('成功路径：POST 到宿主路由并 setDraft，随后出现撤销
   await pending
 
   assert.deepEqual(harness.written, ['请把脚本改写成……'])
-  const after = harness.view()
-  assert.equal(after.noteText, 'done')
-  assert.equal(after.noteTone, 'ok')
-  assert.notEqual(after.undo, null, '成功替换后应出现撤销按钮')
+  // 成功静默（P12）：草稿肉眼可见地变了，不再闪一句「已替换为优化结果」。
+  assert.equal(harness.view().noteText, null, '成功不再弹提示')
+  const after = await harness.openMenu()
+  assert.notEqual(after.undo, null, '成功替换后菜单里应出现撤销项')
   assert.equal(after.undo.props['data-state'], 'clean')
+  // 菜单收起时也要能看出"上次优化还能撤销"：▾ 上的圆点角标。
+  assert.equal(harness.view().presetToggle.props['data-undo'], 'available')
 })
 await test('生成中再点 = 取消：不提示失败，回到 idle', async () => {
   const network = installFetch()
@@ -1180,17 +1293,23 @@ await test('点主按钮不带 presetId（默认提示词路径不变）', async
   network.respond({ data: { text: '改写后' } })
   await pending
 })
-await test('目录读失败：不渲染菜单按钮，主按钮照常可用', async () => {
+await test('目录读失败：没有可选项时不渲染菜单；主按钮照常可用', async () => {
   const broken = installFetch({ failCatalog: true })
   const other = mount({ draft: '草稿' })
   other.view()
   await tick()
-  assert.equal(other.view().presetToggle, null, '目录读失败不能冒出一个空菜单')
+  assert.equal(other.view().presetToggle, null, '目录读失败且本次调用还没产出时，不该冒出一个空菜单')
   const pending = other.view().optimize.props.onClick()
   assert.equal(broken.postCalls.length, 1, '主按钮不受目录失败影响')
   broken.respond({ data: { text: '改写后' } })
   await pending
   assert.equal(other.truth.draft, '改写后')
+
+  // **P12 的关键不变量**：撤销属于"本次调用留下的东西"，它的触达不能依赖 /catalog。
+  // 目录挂了但优化成功了，菜单必须自己出现，否则撤销入口会随目录读取失败一起消失。
+  const retried = await other.openMenu()
+  assert.notEqual(retried.undo, null, '目录读失败不影响撤销入口')
+  assert.equal(retried.profileItems.length, 0, '目录没到，追加提示词区自然是空的')
 })
 await test('与内置追加提示词同 id 的预设不进"预设"区（避免同一个名字出现两次）', async () => {
   // 真实部署里 `cordis.patch.yml` 的 presets 就是 concise/spec —— 合并后它们是内置追加提示词的
@@ -1314,8 +1433,8 @@ await test('设置页区间也走宿主下发：换一组 limits 立刻生效', 
   assert.equal(ok.scope.mutations.length, 1, '边界值必须放行')
 })
 
-console.log('client half: P3 撤销栈')
-await test('撤销恢复原文并弹栈（按钮消失）', async () => {
+console.log('client half: P3 撤销栈（P12 起入口在 ▾ 菜单里）')
+await test('撤销恢复原文并弹栈（菜单项随之消失）', async () => {
   const network = installFetch()
   const harness = mount({ draft: '原文' })
   const pending = harness.view().optimize.props.onClick()
@@ -1323,12 +1442,16 @@ await test('撤销恢复原文并弹栈（按钮消失）', async () => {
   await pending
   assert.equal(harness.truth.draft, '优化后')
 
-  await harness.view().undo.props.onClick()
+  // 点撤销 = 两次交互（开菜单 → 点项）；执行成功后菜单自动收起。
+  const afterClick = await harness.clickUndo()
   assert.equal(harness.truth.draft, '原文', '撤销必须回到优化前的草稿')
   assert.equal(harness.written.at(-1), '原文')
-  const after = harness.view()
-  assert.equal(after.undo, null, '栈空后撤销按钮消失')
-  assert.equal(after.noteText, 'undone')
+  assert.equal(afterClick.menuOpen, false, '执行完撤销，菜单收起')
+  assert.equal(afterClick.noteText, 'undone')
+  const after = await harness.openMenu()
+  assert.equal(after.undo, null, '栈空后菜单里不再有撤销项')
+  // 角标同步消失：▾ 上不该还亮着"可撤销"。
+  assert.equal(harness.view().presetToggle.props['data-undo'], undefined)
 })
 await test('连续两次优化可逐层撤销', async () => {
   const harness = mount({ draft: 'A' })
@@ -1341,14 +1464,14 @@ await test('连续两次优化可逐层撤销', async () => {
   }
   assert.equal(harness.truth.draft, 'C')
 
-  await harness.view().undo.props.onClick()
+  await harness.clickUndo()
   assert.equal(harness.truth.draft, 'B', '第一层撤销 → 上一次的输入')
-  assert.notEqual(harness.view().undo, null, '还有一层可撤')
-  await harness.view().undo.props.onClick()
+  assert.notEqual((await harness.openMenu()).undo, null, '还有一层可撤')
+  await harness.clickUndo()
   assert.equal(harness.truth.draft, 'A', '第二层撤销 → 最初的草稿')
-  assert.equal(harness.view().undo, null)
+  assert.equal((await harness.openMenu()).undo, null)
 })
-await test('撤销前草稿被手改：第一次点击只警告，第二次强制还原', async () => {
+await test('撤销前草稿被手改：第一次点击只警告，第二次强制还原（菜单保持展开）', async () => {
   const network = installFetch()
   const harness = mount({ draft: '原文' })
   const pending = harness.view().optimize.props.onClick()
@@ -1356,16 +1479,23 @@ await test('撤销前草稿被手改：第一次点击只警告，第二次强�
   await pending
 
   harness.type('用户又改了')   // 撤销 CAS 失败
-  const dirty = harness.view()
+  const dirty = await harness.openMenu()
   assert.equal(dirty.undo.props['data-state'], 'dirty')
+  assert.equal(String(dirty.undoLabel).includes('undo.menuItemDirty'), true, '草稿改过时菜单项文案要如实')
   await dirty.undo.props.onClick()
   assert.equal(harness.truth.draft, '用户又改了', '第一次点击不得直接覆盖')
   assert.equal(harness.view().noteText, 'undoDirty')
+  // 关键：第一次点击只是"武装强制还原"，菜单必须留着——否则用户得重开菜单才能点第二次。
+  const armed = harness.view()
+  assert.equal(armed.menuOpen, true, '武装状态下菜单不得收起')
+  assert.equal(armed.undo.props['data-state'], 'armed')
+  assert.equal(String(armed.undoLabel).includes('undo.menuItemForce'), true, '菜单项自己要说明下一步')
 
-  await harness.view().undo.props.onClick()   // 第二次 = 强制
+  await armed.undo.props.onClick()   // 第二次 = 强制
   assert.equal(harness.truth.draft, '原文')
   assert.equal(harness.view().noteText, 'undoneForced')
-  assert.equal(harness.view().undo, null)
+  assert.equal(harness.view().menuOpen, false, '真的执行了才收起菜单')
+  assert.equal((await harness.openMenu()).undo, null)
 })
 await test('撤销栈按会话数上限淘汰（会话被删时没有任何通知能到达插件）', async () => {
   const SESSIONS = 21   // 超过 MAX_UNDO_SESSIONS(20)
@@ -1376,7 +1506,7 @@ await test('撤销栈按会话数上限淘汰（会话被删时没有任何通�
   const firstPending = first.view().optimize.props.onClick()
   firstNetwork.respond({ data: { text: 's0 优化后' } })
   await firstPending
-  assert.equal(first.view().undo !== null, true)
+  assert.equal((await first.openMenu()).undo !== null, true)
 
   for (let index = 1; index < SESSIONS; index += 1) {
     const session = mount({ draft: `s${String(index)} 原文`, sessionId: `s-${String(index)}`, shared })
@@ -1385,8 +1515,8 @@ await test('撤销栈按会话数上限淘汰（会话被删时没有任何通�
     network.respond({ data: { text: `s${String(index)} 优化后` } })
     await pending
   }
-  // 最久未使用的会话被淘汰：它的栈不再存在，撤销按钮消失（草稿本身不受影响）。
-  assert.equal(first.view().undo, null, '超出会话数上限后最旧的撤销栈应被丢弃')
+  // 最久未使用的会话被淘汰：它的栈不再存在，菜单里的撤销项消失（草稿本身不受影响）。
+  assert.equal((await first.openMenu()).undo, null, '超出会话数上限后最旧的撤销栈应被丢弃')
   assert.equal(first.truth.draft, 's0 优化后', '淘汰只影响撤销记录，不碰草稿')
 })
 await test('撤销栈深度上限 10（最旧的被丢弃）', async () => {
@@ -1399,8 +1529,9 @@ await test('撤销栈深度上限 10（最旧的被丢弃）', async () => {
   }
   assert.equal(harness.truth.draft, 'd12')
   let depth = 0
-  while (harness.view().undo !== null && depth < 20) {
-    await harness.view().undo.props.onClick()
+  // 每一轮都要重新开菜单：执行成功的撤销会收起菜单（这正是真实交互）。
+  while ((await harness.openMenu()).undo !== null && depth < 20) {
+    await harness.clickUndo()
     depth += 1
   }
   assert.equal(depth, 10, '只保留最近 10 层')
@@ -1415,14 +1546,16 @@ await test('不同会话的撤销栈互不干扰', async () => {
   const pending = first.view().optimize.props.onClick()
   network.respond({ data: { text: 'A 会话优化后' } })
   await pending
-  assert.equal(first.view().undo !== null, true)
+  assert.equal((await first.openMenu()).undo !== null, true)
 
   const second = mount({ draft: 'B 会话原文', sessionId: 'session-B', shared })
-  assert.equal(second.view().undo, null, 'B 会话不该看到 A 的撤销记录')
+  second.view()   // 先渲染一次：拉目录的副作用挂在渲染上
+  await tick()    // 等目录落地（▾ 菜单要等 profiles 到达才渲染）
+  assert.equal((await second.openMenu()).undo, null, 'B 会话不该看到 A 的撤销记录')
   assert.equal(second.truth.draft, 'B 会话原文', 'B 会话草稿不得被 A 的撤销影响')
 
   // A 撤销只动 A 的草稿。
-  await first.view().undo.props.onClick()
+  await first.clickUndo()
   assert.equal(first.truth.draft, 'A 会话原文')
   assert.equal(second.truth.draft, 'B 会话原文')
 })
@@ -1446,13 +1579,13 @@ await test('增量边到边写（节流），最终以 done 帧的文本为准�
   await pending
   assert.deepEqual(harness.written, ['改写', '改写后的文本（规范化）'])
   assert.equal(harness.truth.draft, '改写后的文本（规范化）')
-  assert.equal(harness.view().noteText, 'done')
-  assert.notEqual(harness.view().undo, null, '成功后才出现撤销按钮')
+  assert.equal(harness.view().noteText, null, '成功静默（P12）：草稿变了就是最好的反馈')
+  assert.notEqual((await harness.openMenu()).undo, null, '成功后才出现撤销项')
 
   // 只有一条撤销记录：一次撤销直接回到原文。
-  await harness.view().undo.props.onClick()
+  await harness.clickUndo()
   assert.equal(harness.truth.draft, '原文')
-  assert.equal(harness.view().undo, null)
+  assert.equal((await harness.openMenu()).undo, null)
 })
 await test('用户在流式中途手改 → 立刻中止、不覆盖、给 staleResult 提示', async () => {
   const network = installFetch({ streaming: true })
@@ -1474,7 +1607,7 @@ await test('用户在流式中途手改 → 立刻中止、不覆盖、给 stale
   assert.equal(harness.truth.draft, '用户插话', '绝不能覆盖用户此刻的输入')
   assert.equal(harness.view().noteText, 'staleResult')
   assert.equal(harness.view().noteTone, 'warn')
-  assert.equal(harness.view().undo, null)
+  assert.equal((await harness.openMenu()).undo, null)
 })
 await test('流中途 error 帧 → 还原原文并说明（不留半截草稿）', async () => {
   const network = installFetch({ streaming: true })
@@ -1488,7 +1621,7 @@ await test('流中途 error 帧 → 还原原文并说明（不留半截草稿�
   assert.equal(harness.written.at(-1), '原文')
   assert.equal(harness.view().noteText, '上游炸了（streamReverted）')
   assert.equal(harness.view().noteTone, 'error')
-  assert.equal(harness.view().undo, null, '失败不入撤销栈')
+  assert.equal((await harness.openMenu()).undo, null, '失败不入撤销栈')
 })
 await test('流被掐断（网络中断）→ 同样还原原文并提示失败', async () => {
   const network = installFetch({ streaming: true })
@@ -1512,20 +1645,254 @@ await test('旧宿主没有流式路由 → 自动回退一次性 JSON，行为�
   network.respond({ data: { text: '优化后' } })
   await pending
   assert.deepEqual(harness.written, ['优化后'], '回退路径不得留下流式的半截痕迹')
-  assert.equal(harness.view().noteText, 'done')
-  assert.notEqual(harness.view().undo, null)
+  assert.equal(harness.view().noteText, null, '回退路径同样静默成功')
+  assert.notEqual((await harness.openMenu()).undo, null)
 })
 await test('流式中途取消 → 不写、不提示失败、回到 idle', async () => {
   const network = installFetch({ streaming: true })
   const harness = mount({ draft: '原文' })
+  // 先跑一次成功的，留下一条撤销记录：新的一次调用不该把它弄丢，
+  // 而"成功提示"已经不存在（P12），所以这里核对的是菜单里的撤销项与 ▾ 角标。
+  const first = harness.view().optimize.props.onClick()
+  network.stream.push('改写')
+  network.stream.done({ text: '改写后的文本', modelUsed: { provider: 'p', model: 'm' } })
+  await first
+  assert.notEqual((await harness.openMenu()).undo, null)
+  await harness.view().presetToggle.props.onClick()   // 收起菜单，回到静止态
+  assert.equal(harness.view().presetToggle.props['data-undo'], 'available', '▾ 上的圆点表示可撤销')
+  harness.truth.draft = '原文'   // 还原草稿，第二次调用从同一个基线开始
+
   const running = harness.view().optimize.props.onClick()
+  assert.equal(harness.view().noteText, null)
   network.stream.push('改写')
   await flush()
   await harness.view().optimize.props.onClick()   // 生成中再点 = 取消
   await running
   assert.equal(harness.view().optimize.props['data-state'], 'idle')
   assert.equal(harness.view().noteText, null, '取消不该弹失败提示')
-  assert.equal(harness.view().undo, null)
+  assert.notEqual((await harness.openMenu()).undo, null, '上一轮成功留下的撤销记录不受这次取消影响')
+})
+
+console.log('client half: 控件收敛（P12：工具行只剩 ✦ 与 ▾）')
+await test('最坏情况下工具行也只有两个按钮：撤销与思考回看都收进菜单', async () => {
+  // 这条用例钉的是 P12 的验收标准本身：**一次带思考的成功优化之后**（旧版这里是 4 个控件）
+  // 工具行里必须只剩 ✦ 与 ▾；撤销与思考回看同时可达，但都不占工具行。
+  await withClock(async ({ advance }) => {
+    const network = installFetch({ streaming: true })
+    const harness = mount({ draft: '原文' })
+    const pending = harness.view().optimize.props.onClick()
+    await flush()
+    advance(200)
+    network.stream.reasoning('先想清楚再写。')
+    await flush()
+    network.stream.push('改写后的文本')
+    network.stream.done({ text: '改写后的文本', modelUsed: { provider: 'p', model: 'm' } })
+    await pending
+
+    // 生成结束后：面板自动收起、提示槽位空着，工具行只有两个控件。
+    const quiet = harness.view()
+    assert.equal(quiet.thinkingPanel, null)
+    assert.equal(quiet.noteText, null)
+    assert.equal(quiet.progress, null)
+    const rowButtons = childrenOf(quiet.node).filter(child => child.type === 'button')
+    assert.deepEqual(
+      rowButtons.map(button => button.props['data-dsh-better-input'] !== undefined ? 'optimize' : 'menu'),
+      ['optimize', 'menu'],
+      '工具行只允许 ✦ 与 ▾ 两个按钮',
+    )
+
+    // 两个入口都在菜单里，且都可用。
+    const menu = await harness.openMenu()
+    assert.notEqual(menu.undo, null, '撤销可达')
+    assert.notEqual(menu.thinkingToggle, null, '思考回看可达')
+
+    // 顺带核对顺序：本次调用分区在追加提示词区之前（先"这次的结果"，再"长期设置"）。
+    const itemKeys = childrenOf(byProp(menu.node, 'data-dsh-better-input-menu')[0]).map((item) => {
+      if (item.props?.['data-dsh-better-input-undo'] !== undefined) return 'undo'
+      if (item.props?.['data-dsh-better-input-thinking-toggle'] !== undefined) return 'thinking'
+      if (item.props?.['data-dsh-better-input-profile'] !== undefined) return 'profile'
+      return 'head'
+    })
+    assert.deepEqual(itemKeys, ['head', 'undo', 'thinking', 'head', 'profile', 'profile', 'profile'])
+  })
+})
+
+console.log('client half: 进度行与思考过程（P11）')
+await test('进度行：等待→思考→写入三个阶段，耗时与计数实时可见', async () => {
+  await withClock(async ({ advance }) => {
+    const network = installFetch({ streaming: true })
+    const harness = mount({ draft: '原文' })
+    const pending = harness.view().optimize.props.onClick()
+    await flush()
+
+    // ① 等待模型：一个事件都还没到，正是"看起来卡住"的那一段——进度行必须先出现。
+    assert.equal(harness.view().progressPhase, 'waiting')
+    assert.equal(harness.view().progressText, 'progress.waiting 0.0s')
+    assert.equal(harness.view().noteText, null, '生成中提示槽位让给进度行，不是结果提示')
+
+    advance(2400)
+    tickIntervals()
+    assert.equal(harness.view().progressText, 'progress.waiting 2.4s', '耗时由本地计时器推进')
+
+    // ② 思考中：计数按已收到的思考字数走。
+    network.stream.reasoning('先看需求')
+    await flush()
+    assert.equal(harness.view().progressPhase, 'thinking')
+    assert.equal(harness.view().progressText, 'progress.thinking 2.4s · 4progress.chars')
+
+    // ③ 写入中：计数换成已写进草稿的字数。
+    network.stream.push('改写')
+    await flush()
+    assert.equal(harness.view().progressPhase, 'writing')
+    assert.equal(harness.view().progressText, 'progress.writing 2.4s · 2progress.chars')
+
+    network.stream.done({ text: '改写后的文本', modelUsed: { provider: 'p', model: 'm' } })
+    await pending
+    assert.equal(harness.view().progress, null, '结束后进度行退场')
+    assert.equal(harness.view().noteText, null, '成功静默：槽位空着，把注意力留给 ✦ 与 ▾')
+  })
+})
+await test('思考面板：出现思考就自动展开，收尾自动收起，之后从菜单回看', async () => {
+  await withClock(async ({ advance }) => {
+    const network = installFetch({ streaming: true })
+    const harness = mount({ draft: '原文' })
+    const pending = harness.view().optimize.props.onClick()
+    await flush()
+    assert.equal(harness.view().thinkingPanel, null, '没有思考内容时不出现面板')
+    // 生成中菜单本身是禁用的（撤销与思考回看都是"收尾之后"的事），所以此时没有第二个入口。
+    assert.equal(harness.view().presetToggle.props.disabled, true, '生成中菜单不可用')
+
+    network.stream.reasoning('先理解需求，')
+    await flush()
+    assert.notEqual(harness.view().thinkingPanel, null, '第一段思考到达即自动展开')
+    assert.equal(harness.view().thinkingText, '先理解需求，')
+
+    // 节流窗口内到达的增量先攒着（面板最多滞后 100ms），下一段到点后再一起落地。
+    advance(200)
+    network.stream.reasoning('再逐句改写。')
+    await flush()
+    assert.equal(harness.view().thinkingText, '先理解需求，再逐句改写。')
+    assert.equal(harness.view().thinkingTitle.includes('12progress.chars'), true, '标题里的累计字数如实显示')
+
+    network.stream.push('改写后的文本')
+    network.stream.done({ text: '改写后的文本', modelUsed: { provider: 'p', model: 'm' } })
+    await pending
+    assert.equal(harness.view().thinkingPanel, null, '收尾自动收起')
+
+    // 回看：开菜单 → 点「查看思考过程（n 字）」→ 菜单关、面板开；面板里「收起」再收起来。
+    const menu = await harness.openMenu()
+    const item = menu.thinkingToggle
+    assert.notEqual(item, null, '思考内容留着，菜单里给一个回看入口')
+    assert.equal(String(childrenOf(item)[0]).includes('thinking.menuItem'), true)
+    assert.equal(String(childrenOf(item)[0]).includes('12progress.chars'), true, '回看项要带上字数')
+    await item.props.onClick()
+    assert.equal(harness.view().menuOpen, false, '开面板要收起菜单（两者锚在同一处）')
+    assert.equal(harness.view().thinkingText, '先理解需求，再逐句改写。')
+    await harness.view().thinkingClose.props.onClick()
+    assert.equal(harness.view().thinkingPanel, null)
+  })
+})
+await test('思考内容绝不进草稿、不进撤销栈（只走展示）', async () => {
+  const network = installFetch({ streaming: true })
+  const harness = mount({ draft: '原文' })
+  const pending = harness.view().optimize.props.onClick()
+  await flush()
+
+  network.stream.reasoning('这段是我的推理过程')
+  network.stream.push('改写后的文本')
+  await flush()
+  // 草稿里只可能是文本增量：思考增量走的是另一条支路（onReasoning）。
+  assert.equal(harness.written.every(text => !text.includes('推理过程')), true)
+  network.stream.done({ text: '改写后的文本', modelUsed: { provider: 'p', model: 'm' } })
+  await pending
+  assert.equal(harness.truth.draft, '改写后的文本')
+
+  // 撤销回到原文——撤销栈里也只有文本，没有思考。
+  await harness.clickUndo()
+  assert.equal(harness.truth.draft, '原文')
+  assert.equal(harness.written.every(text => !text.includes('推理过程')), true)
+})
+await test('思考过长：只保留最近的部分，但标题里的总字数如实', async () => {
+  await withClock(async ({ advance }) => {
+    const network = installFetch({ streaming: true })
+    const harness = mount({ draft: '原文' })
+    const pending = harness.view().optimize.props.onClick()
+    await flush()
+
+    // 每次 5000 字，推 5 次 = 25000 字 > 客户端上限 20000 → 尾部保留、头部丢弃。
+    for (let index = 0; index < 5; index += 1) {
+      advance(200)   // 跨过节流窗口：每一段都要真的落地，测的才是"截断"而不是"节流"
+      network.stream.reasoning(`${String(index)}`.repeat(5000))
+      await flush()
+    }
+    network.stream.done({ text: '结果', modelUsed: { provider: 'p', model: 'm' } })
+    await pending
+
+    // 收尾会自动收起面板，回看要先开菜单再点回看项。
+    const item = (await harness.openMenu()).thinkingToggle
+    assert.notEqual(item, null)
+    await item.props.onClick()
+    const text = String(harness.view().thinkingText)
+    assert.equal(text.startsWith('thinking.truncated'), true, '被截断必须说出来，否则用户以为模型只想这么点')
+    assert.equal(text.includes('0000'), false, '最前面的内容已被丢弃')
+    assert.equal(text.includes('4444'), true, '保留的是尾部（生成中要跟着最新思考走）')
+    assert.equal(harness.view().thinkingTitle.includes('25000progress.chars'), true, '累计字数不受截断影响')
+  })
+})
+await test('思考面板与统一菜单互斥：同时打开会叠在同一处', async () => {
+  const network = installFetch({ streaming: true, presets: [{ id: 'shorter', label: '更短' }] })
+  const harness = mount({ draft: '原文' })
+  const pending = harness.view().optimize.props.onClick()
+  await flush()
+  network.stream.reasoning('想一下')
+  network.stream.push('改写')
+  network.stream.done({ text: '改写', modelUsed: { provider: 'p', model: 'm' } })
+  await pending
+
+  // 从菜单里打开面板：菜单要同时收起。
+  const item = (await harness.openMenu()).thinkingToggle
+  await item.props.onClick()
+  assert.notEqual(harness.view().thinkingPanel, null)
+  assert.equal(harness.view().menuOpen, false, '开思考面板要收起菜单')
+
+  // 反过来：开菜单要收起面板。
+  await harness.view().presetToggle.props.onClick()
+  assert.equal(harness.view().menuOpen, true)
+  assert.equal(harness.view().thinkingPanel, null, '开菜单要收起思考面板')
+})
+await test('没有思考内容的模型（或旧宿主）：只有进度行，不出现任何思考 UI', async () => {
+  const network = installFetch({ streaming: true })
+  const harness = mount({ draft: '原文' })
+  const pending = harness.view().optimize.props.onClick()
+  await flush()
+  network.stream.push('改写')
+  await flush()
+  assert.equal(harness.view().progressPhase, 'writing')
+  network.stream.done({ text: '改写', modelUsed: { provider: 'p', model: 'm' } })
+  await pending
+  assert.equal(harness.view().thinkingPanel, null)
+  const menu = await harness.openMenu()
+  assert.equal(menu.thinkingToggle, null, '菜单里也不该冒出思考项')
+  // 本次调用分区此时只剩"可撤销"这一项（撤销项照样在）。
+  assert.notEqual(menu.undo, null)
+})
+await test('流中途失败：已写入的草稿还原，但思考内容仍可回看', async () => {
+  const network = installFetch({ streaming: true })
+  const harness = mount({ draft: '原文' })
+  const pending = harness.view().optimize.props.onClick()
+  await flush()
+  network.stream.reasoning('想到一半')
+  network.stream.push('半截结果')
+  await flush()
+  network.stream.error({ error: 'model-failed', message: '上游炸了' })
+  await pending
+
+  assert.equal(harness.truth.draft, '原文', '草稿照旧还原')
+  assert.equal(harness.view().thinkingPanel, null, '面板照旧自动收起')
+  const item = (await harness.openMenu()).thinkingToggle
+  assert.notEqual(item, null, '失败后回看入口照旧')
+  await item.props.onClick()
+  assert.equal(harness.view().thinkingText, '想到一半', '失败原因常常就在思考里，回看比丢掉有用')
 })
 
 console.log('client half: 设置页')
@@ -1662,8 +2029,34 @@ await test('改动后保存：只发变化的字段，带 revision，原子提�
   assert.equal(page.view().noteText, 'settings.saved')
   assert.equal(page.view().noteTone, 'ok')
 })
-await test('没有改动时保存不发请求，只提示', async () => {
-  const page = mountSettings({ settingsValue: { systemPrompt: '不变的' } })
+await test('显示思考过程：默认勾选、关掉写 false、再勾回来发 unset（不往设置里塞多余的 true）', async () => {
+  // 未设置 = 默认开：复选框必须是勾上的（否则用户会以为思考默认是关的）。
+  const page = mountSettings({ settingsValue: {} })
+  let view = page.open('params')
+  assert.equal(view.inputs.get('showReasoning').props.checked, true, '默认开')
+  assert.equal(view.inputs.get('showReasoning').props.type, 'checkbox')
+
+  // 关掉 → 写 false（宿主据此不再发思考内容）。
+  view.inputs.get('showReasoning').props.onChange({ target: { checked: false } })
+  await page.view().action('save').props.onClick()
+  assert.deepEqual(page.scope.mutations[0].ops, [{ op: 'set', path: ['showReasoning'], value: false }])
+
+  // 已存 false → 复选框显示未勾选；再勾回来 = unset（回落到默认的"开"）。
+  const stored = mountSettings({ settingsValue: { showReasoning: false } })
+  view = stored.open('params')
+  assert.equal(view.inputs.get('showReasoning').props.checked, false)
+  view.inputs.get('showReasoning').props.onChange({ target: { checked: true } })
+  await stored.view().action('save').props.onClick()
+  assert.deepEqual(stored.scope.mutations[0].ops, [{ op: 'unset', path: ['showReasoning'] }])
+
+  // 勾着默认值再保存 = 没有改动（不该产生一次"把默认值写进文档"的写入）。
+  const untouched = mountSettings({ settingsValue: {} })
+  untouched.open('params')
+  await untouched.view().action('save').props.onClick()
+  assert.equal(untouched.scope.mutations.length, 0, '默认值不该被写进设置文档')
+  assert.equal(untouched.view().noteText, 'settings.noChange')
+})
+await test('没有改动时保存不发请求，只提示', async () => {  const page = mountSettings({ settingsValue: { systemPrompt: '不变的' } })
   await page.view().action('save').props.onClick()
   assert.equal(page.scope.mutations.length, 0)
   assert.equal(page.view().noteText, 'settings.noChange')
@@ -1771,12 +2164,13 @@ await test('恢复默认配置：对所有字段发 unset（含追加提示词�
   await page.view().action('reset').props.onClick()
   assert.equal(page.scope.mutations.length, 1)
   const { ops } = page.scope.mutations[0]
-  // 9 个通用字段（含追加提示词列表与启用 id）+ 每个优化风格 1 个提示词字段。重置必须连追加提示词一起清掉，
-  // 否则"恢复默认配置"会留下改不掉的追加提示词。
-  assert.equal(ops.length, 9 + HOST_STYLE_IDS.length)
+  // 10 个通用字段（含追加提示词列表、启用 id 与 P11 的显示思考过程）+ 每个优化风格 1 个提示词字段。
+  // 重置必须连追加提示词一起清掉，否则"恢复默认配置"会留下改不掉的追加提示词。
+  assert.equal(ops.length, 10 + HOST_STYLE_IDS.length)
   assert.equal(ops.every(op => op.op === 'unset'), true)
   assert.deepEqual(ops.map(op => op.path[0]).sort(), [
     'customPromptEnabled', 'maxOutputTokens', 'modelId', 'modelProvider', 'systemPrompt', 'temperature', 'timeoutMs',
+    'showReasoning',
     'promptProfiles', 'activeProfileId',
     ...HOST_STYLE_FIELDS,
   ].sort())

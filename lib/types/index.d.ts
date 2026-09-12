@@ -52,6 +52,8 @@ export declare const SETTINGS_NAMESPACE = 'better-input'
 export declare const PROMPT_PROFILES_FIELD = 'promptProfiles'
 /** 设置段里"当前启用条目 id"的字段名（空 = 不追加）。 */
 export declare const ACTIVE_PROFILE_FIELD = 'activeProfileId'
+/** 设置段里"是否把模型思考过程透传给浏览器"的字段名（未设置 = 默认开）。 */
+export declare const SHOW_REASONING_FIELD = 'showReasoning'
 /** 追加提示词数量上限。 */
 export declare const MAX_PROMPT_PROFILES = 20
 
@@ -71,6 +73,11 @@ export interface BetterInputSettingsSection {
   maxOutputTokens?: number
   /** 单次调用超时（毫秒）。 */
   timeoutMs?: number
+  /**
+   * 是否把模型的**思考过程**透传给浏览器（P11）。未设置 = 默认开；只有显式的 `false` 才关，
+   * 关掉时宿主根本不发 `reasoning` 事件（思考正文不出宿主）。
+   */
+  showReasoning?: boolean
   /** 多条追加提示词；`activeProfileId` 指向其中之一（或内置条目 id）时它的正文会追加到系统提示词之后。 */
   promptProfiles?: PromptProfile[]
   /** 当前启用的追加条目 id；空串/缺省 = 不追加。 */
@@ -127,6 +134,8 @@ export declare function effectiveConfig(
   temperature?: number
   maxOutputTokens: number
   timeoutMs: number
+  /** 是否透传思考过程（P11）：默认 `true`，只有设置段里显式的 `false` 才关。 */
+  showReasoning: boolean
   /** 合并后的追加提示词清单（内置种子在前）；正文只在宿主用，catalog 行由 profileRowsOf 裁剪。 */
   profiles: ReadonlyArray<{
     id: string, label: string, prompt: string,

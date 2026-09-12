@@ -88,7 +88,7 @@ const TMP_PARENT = writableParent()
  *
  * `webServer`/`llm` 用替身（只为让插件通过 `inject` 门，路由注册被捕获下来），
  * settings 提供者则按需挂**真实的** `dsh-settings-file`（写到临时文档，不碰用户配置）。
- * @param {{ settings?: 'before' | 'after' | 'never', config?: object }} options - 提供者挂载时机与插件组合配置。
+ * @param {{ settings?: 'before' | 'after' | 'never', config?: object, chunks?: object[] }} options - 提供者挂载时机与插件组合配置。
  * @returns {Promise<{ ctx: object, routes: object[], calls: object[], documentPath: string,
  *   dispose: () => Promise<void> }>} 句柄（`calls` 是每次 LLM 调用的入参，用来核对 system prompt）。
  */
@@ -100,6 +100,12 @@ async function boot(options = {}) {
   const ctx = new Context()
   const routes = []
   const calls = []
+  // 模型流的默认内容：一条最小可用的文本流，让 /optimize 能走到 200。
+  // 需要思考增量的用例通过 `chunks` 换掉它（P11）。
+  const chunks = options.chunks ?? [
+    { type: 'text-delta', index: 0, text: '改写后的' },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]
 
   ctx.plugin({
     name: 'host-stub-services',
@@ -115,11 +121,10 @@ async function boot(options = {}) {
       })
       stub.provide('llm', {
         // 记下每次调用的入参（system prompt 是"逐风格提示词是否真的生效"的唯一判据），
-        // 并回一段最小可用的文本流，让 /optimize 能走到 200。
+        // 并按 `chunks` 回一段流（默认是文本流；P11 的用例换成"思考 + 文本"）。
         stream: async function* stream(callOptions) {
           calls.push(callOptions)
-          yield { type: 'text-delta', index: 0, text: '改写后的' }
-          yield { type: 'finish', reason: { kind: 'stop' } }
+          for (const chunk of chunks) yield chunk
         },
         listProviders: () => [],
         listModels: async () => [],
@@ -194,7 +199,62 @@ async function drive(routes, path, method, body) {
 }
 
 console.log('integration: 设置命名空间的注册时机（真实 cordis + 真实 settings 提供者）')
+/** 一段"思考 + 文本"的流：P11 的端到端用例用它核对 reasoning 帧的有无。 */
+const REASONING_CHUNKS = [
+  { type: 'reasoning-delta', index: 0, text: '先看需求。' },
+  { type: 'text-delta', index: 1, text: '改写后的' },
+  { type: 'finish', reason: { kind: 'stop' } },
+]
 
+/**
+ * 解析 SSE 帧（`event:` / `data:` 两行）。
+ * @param {string} text - 累积的响应文本。
+ * @returns {Array<{ event: string, data: any }>} 帧列表。
+ */
+function parseSseFrames(text) {
+  const events = []
+  for (const block of text.split('\n\n')) {
+    const lines = block.split('\n')
+    if (lines.length === 0 || lines[0].startsWith(':')) continue
+    const event = lines.find(line => line.startsWith('event: '))?.slice(7)
+    const data = lines.find(line => line.startsWith('data: '))?.slice(6)
+    if (event === undefined) continue
+    events.push({ event, data: data === undefined ? undefined : JSON.parse(data) })
+  }
+  return events
+}
+
+/**
+ * 驱动**流式**路由并收集 SSE 帧（真实 settings 服务下的端到端用）。
+ * @param {object[]} routes - 已注册路由。
+ * @param {object} body - JSON 请求体。
+ * @returns {Promise<{ status: number, events: Array<{ event: string, data: any }> }>} 结果。
+ */
+async function driveStream(routes, body) {
+  const route = routes.find(candidate => candidate.path === ROUTE_STREAM)
+  assert.ok(route !== undefined, `route ${ROUTE_STREAM} 未注册`)
+  const payload = JSON.stringify(body)
+  const request = {
+    method: 'POST',
+    url: ROUTE_STREAM,
+    headers: { host: '127.0.0.1:3080', 'sec-fetch-site': 'same-origin' },
+    socket: { remoteAddress: '127.0.0.1' },
+    async *[Symbol.asyncIterator]() { yield Buffer.from(payload, 'utf8') },
+  }
+  const writes = []
+  const response = {
+    statusCode: 0,
+    headers: {},
+    writableEnded: false,
+    setHeader(name, value) { this.headers[name] = value },
+    write(text) { writes.push(text) },
+    once() {},
+    off() {},
+    end() { this.writableEnded = true },
+  }
+  await route.handler(request, response)
+  return { status: response.statusCode, events: parseSseFrames(writes.join('')) }
+}
 if (TMP_PARENT === undefined) {
   console.log('SKIP  当前环境既不能写 test/.tmp 也不能写系统临时目录（只读沙箱/受限 CI）——不是回归')
   process.exit(0)
@@ -363,8 +423,60 @@ await test('追加提示词：保存 → catalog 可见 → 切换后下一次�
   }
 })
 
-await test('完全没有设置提供者 → 插件照常挂载，只是 settings.available=false', async () => {
-  const host = await boot({ settings: 'never' })
+await test('思考过程透传（P11）：真实设置文档 → 真实 schema → 流式帧（关掉就根本不发）', async () => {
+  const host = await boot({
+    settings: 'after',
+    // 固定模型路由，否则流式路由会在开流之前就以 502 no-model-route 结束。
+    config: { systemPrompt: 'BASE', model: { provider: 'p', model: 'm' } },
+    chunks: REASONING_CHUNKS,
+  })
+  try {
+    // 真实 settings 服务上写这个字段：**schema 里没有它就会当场失败**——
+    // 这条断言钉的正是"宿主 schema 与客户端设置页用的是同一个字段"。
+    await host.ctx.settings.update(SETTINGS_NAMESPACE, { showReasoning: true })
+    await settle(30)
+    assert.equal(
+      readFileSync(host.documentPath, 'utf8').includes('showReasoning'),
+      true,
+      '显示思考过程的开关必须真的落进设置文档',
+    )
+
+    const open = await driveStream(host.routes, { text: '写个脚本' })
+    assert.equal(open.status, 200)
+    assert.deepEqual(open.events, [
+      { event: 'reasoning', data: { text: '先看需求。' } },
+      { event: 'delta', data: { text: '改写后的' } },
+      {
+        event: 'done',
+        data: { text: '改写后的', modelUsed: { provider: 'p', model: 'm' } },
+      },
+    ], '思考增量按序透传，权威文本里不含思考内容')
+
+    // 关掉：走真实 settings 的写入通道（客户端设置页落盘的正是这一层）→ 思考正文不再出宿主。
+    await host.ctx.settings.mutate(SETTINGS_NAMESPACE, [{ op: 'set', path: ['showReasoning'], value: false }])
+    await settle(30)
+    const closed = await driveStream(host.routes, { text: '写个脚本' })
+    assert.deepEqual(closed.events, [
+      { event: 'delta', data: { text: '改写后的' } },
+      { event: 'done', data: { text: '改写后的', modelUsed: { provider: 'p', model: 'm' } } },
+    ], '关掉时是"根本不发"，而不是"发了不显示"')
+
+    // 非布尔值绝不能被当成"照发"：schemastery 或我们的跨字段校验必须把 'false' 挡住，
+    // 或者把它规范化成布尔 false——两条路都可接受，唯独不能变成"继续发思考内容"。
+    try {
+      await host.ctx.settings.mutate(SETTINGS_NAMESPACE, [{ op: 'set', path: ['showReasoning'], value: 'false' }])
+      await settle(30)
+    } catch {
+      // 被拒也符合预期。
+    }
+    const catalog = await drive(host.routes, ROUTE_CATALOG, 'GET')
+    assert.equal(catalog.json.effective.showReasoning, false, '字符串 "false" 不得让思考内容继续下发')
+  } finally {
+    await host.dispose()
+  }
+})
+
+await test('完全没有设置提供者 → 插件照常挂载，只是 settings.available=false', async () => {  const host = await boot({ settings: 'never' })
   try {
     assert.deepEqual(
       host.routes.map(route => route.path).sort(),

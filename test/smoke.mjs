@@ -644,6 +644,67 @@ await test('客户端中途断开：不写事件、不抛错，闸门照常释�
   assert.equal(parseSse(retry.writes).at(-1).event, 'done')
 })
 
+console.log('host half: 思考过程透传（P11）')
+await test('思考增量发 reasoning 帧；权威文本仍只由 text 块装配', async () => {
+  setup({}, {
+    chunks: [
+      { type: 'block-start', index: 0, blockType: 'reasoning' },
+      { type: 'reasoning-delta', index: 0, text: '先看需求' },
+      { type: 'reasoning-delta', index: 0, text: '，再改写。' },
+      { type: 'block-start', index: 1, blockType: 'text' },
+      { type: 'text-delta', index: 1, text: '改写后的提示词。' },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ],
+    selection: { provider: 'p', model: 'm' },
+  })
+  const response = fakeResponse()
+  await driveStream(response, fakeRequest({ body: '{"text":"x"}' }))
+  assert.deepEqual(parseSse(response.writes), [
+    { event: 'reasoning', data: { text: '先看需求' } },
+    { event: 'reasoning', data: { text: '，再改写。' } },
+    { event: 'delta', data: { text: '改写后的提示词。' } },
+    {
+      event: 'done',
+      // 思考文本**绝不能**混进权威文本：客户端以 done 的 text 为准写回草稿，
+      // 混进来就等于把模型的推理内容写进了用户的输入框。
+      data: { text: '改写后的提示词。', modelUsed: { provider: 'p', model: 'm' } },
+    },
+  ])
+})
+await test('设置里关掉「显示思考过程」→ 根本不发 reasoning 帧（思考正文不出宿主）', async () => {
+  setup({}, {
+    chunks: [
+      { type: 'reasoning-delta', index: 0, text: '这段不该出宿主' },
+      { type: 'text-delta', index: 1, text: '结果照常' },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ],
+    selection: { provider: 'p', model: 'm' },
+    settingsSection: { showReasoning: false },
+  })
+  const response = fakeResponse()
+  await driveStream(response, fakeRequest({ body: '{"text":"x"}' }))
+  assert.deepEqual(parseSse(response.writes), [
+    { event: 'delta', data: { text: '结果照常' } },
+    { event: 'done', data: { text: '结果照常', modelUsed: { provider: 'p', model: 'm' } } },
+  ], '关掉时是"不发"，不是"发了不显示"')
+})
+await test('生效值：showReasoning 默认开、只有显式 false 才关；/catalog 如实下发', async () => {
+  // 纯函数层：未设置 = 开（与"未配置就回落到默认"同一条规矩）。
+  assert.equal(effectiveConfig(resolveConfig({}), undefined).showReasoning, true)
+  assert.equal(effectiveConfig(resolveConfig({}), { showReasoning: false }).showReasoning, false)
+  assert.equal(effectiveConfig(resolveConfig({}), { showReasoning: true }).showReasoning, true)
+  // 非法类型必须被拒：写成 'false' 这类字符串会让"关掉"静默失效（判据是 `!== false`）。
+  assert.deepEqual(
+    validateSettingsSection({ showReasoning: 'false' }),
+    ['显示思考过程必须是 true 或 false'],
+  )
+  assert.deepEqual(validateSettingsSection({ showReasoning: false }), [])
+
+  setup({}, { chunks: TEXT_CHUNKS, selection: { provider: 'p', model: 'm' }, settingsSection: { showReasoning: false } })
+  const result = await drivePath(ROUTE_CATALOG, fakeRequest({ method: 'GET' }))
+  assert.equal(result.json.effective.showReasoning, false)
+})
+
 console.log('host half: 请求处理')
 await test('200：把草稿交给模型并回传优化文本', async () => {
   const observations = setup({}, { chunks: TEXT_CHUNKS, selection: { provider: 'agent-provider', model: 'agent-model' } })
