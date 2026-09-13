@@ -11,10 +11,12 @@ import { existsSync } from 'node:fs'
 
 import {
   ACTIVE_PROFILE_FIELD,
+  DEFAULT_REASONING_EFFORT_FIELD,
   MAX_BODY_BYTES,
   MAX_PROMPT_PROFILES,
   PLUGIN_CONFIG_FILENAME,
   PROMPT_PROFILES_FIELD,
+  REASONING_EFFORT_SUGGESTIONS,
   ROUTE,
   ROUTE_CATALOG,
   ROUTE_CATALOG_MODELS,
@@ -1623,6 +1625,110 @@ await test('启用状态与路由表一致性：settings 不可用时路由照�
     observations.routes.map(route => route.path).sort(),
     [ROUTE, ROUTE_STREAM, ROUTE_CATALOG, ROUTE_CATALOG_MODELS, ROUTE_CHECK, ROUTE_OPEN_CONFIG].sort(),
   )
+})
+
+console.log('host half: 思考强度（P14，调用参数之一）')
+await test('思考强度 = 内置 low；设置里写了就用设置里的（对所有模型生效）', () => {
+  const bare = effectiveConfig(resolveConfig(undefined), undefined)
+  assert.equal(bare.reasoningEffort, 'low', '未配置时必须是内置默认 low')
+  // 空串/纯空白 = 未设置（与其它字段"未设置就回落默认"同一条规矩）。
+  assert.equal(effectiveConfig(resolveConfig(undefined), { defaultReasoningEffort: '  ' }).reasoningEffort, 'low')
+  assert.equal(effectiveConfig(resolveConfig(undefined), { defaultReasoningEffort: ' high ' }).reasoningEffort, 'high')
+  // 它是**一个**对所有模型生效的调用参数：没有"按模型覆盖"这回事。
+  assert.equal('modelReasoningEfforts' in bare, false)
+})
+
+await test('思考强度校验：只接受文本（空串 = 未设置），不做白名单', () => {
+  assert.deepEqual(validateSettingsSection({ defaultReasoningEffort: 'low' }), [])
+  assert.deepEqual(validateSettingsSection({ defaultReasoningEffort: '' }), [], '空串 = 未设置，合法')
+  assert.deepEqual(validateSettingsSection({ defaultReasoningEffort: 'x-experimental' }), [], '强度 id 归适配器所有，不做白名单')
+  assert.equal(validateSettingsSection({ defaultReasoningEffort: 5 }).length, 1)
+  assert.equal(validateSettingsSection({ defaultReasoningEffort: null }).length, 0, 'null 视为未设置')
+})
+
+await test('settings schema 认识思考强度字段（归在调用参数里）', () => {
+  const { settingsCalls } = setup({})
+  const schema = settingsCalls[0].schema
+  const resolved = schema({ defaultReasoningEffort: 'low' })
+  assert.equal(resolved.defaultReasoningEffort, 'low')
+  assert.throws(() => schema({ defaultReasoningEffort: 5 }), undefined, '非文本必须被 schema 拒绝')
+  assert.equal(SETTINGS_FIELD_KEYS.includes(DEFAULT_REASONING_EFFORT_FIELD), true)
+})
+
+/** 一个会公布思考强度的模型（适配器契约里的 `reasoning.efforts`）。 */
+const REASONING_INFO = {
+  reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], defaultEffort: 'high' },
+}
+
+await test('思考强度按设置透传给模型（模型公布该强度时）', async () => {
+  // 未配置 → 内置 low 照常传下去；两条优化路由共用同一份核对结论。
+  const observations = setup({}, {
+    chunks: TEXT_CHUNKS,
+    selection: { provider: 'p', model: 'm' },
+    resolveInfo: REASONING_INFO,
+  })
+  const result = await drive(fakeRequest({ body: JSON.stringify({ text: '草稿' }) }))
+  assert.equal(result.status, 200)
+  assert.equal(observations.calls[0].reasoningEffort, 'low')
+
+  const streamed = setup({}, {
+    chunks: TEXT_CHUNKS,
+    selection: { provider: 'p', model: 'm' },
+    resolveInfo: REASONING_INFO,
+    settingsSection: { defaultReasoningEffort: 'high' },
+  })
+  const response = fakeResponse()
+  await driveStream(response, fakeRequest({ body: JSON.stringify({ text: '草稿' }) }))
+  assert.equal(streamed.calls[0].reasoningEffort, 'high', '设置里的值必须真的传给模型')
+})
+
+await test('模型不公布该强度时不传（默认 low 不得把不支持思考的模型打成 502）', async () => {
+  // 模型公布了思考强度，但集合里没有配置值：这是**配置与能力不匹配**，告警 + 回落适配器默认。
+  const mismatch = setup({}, {
+    chunks: TEXT_CHUNKS,
+    selection: { provider: 'p', model: 'm' },
+    resolveInfo: { reasoning: { efforts: [{ id: 'minimal', name: 'Minimal' }] } },
+  })
+  const ok = await drive(fakeRequest({ body: JSON.stringify({ text: '草稿' }) }))
+  assert.equal(ok.status, 200, '不匹配绝不能变成失败')
+  assert.equal(mismatch.calls[0].reasoningEffort, undefined)
+  assert.equal(
+    mismatch.logs.some(entry => entry.level === 'warn' && String(entry.format).includes('does not offer reasoning effort')),
+    true,
+    '不匹配要留一条告警（否则用户以为设置生效了）',
+  )
+
+  // 模型压根不公布思考强度：这是能力事实，不是配置错误 —— 省略且不告警。
+  const plain = setup({}, {
+    chunks: TEXT_CHUNKS,
+    selection: { provider: 'p', model: 'm' },
+  })
+  const plainResult = await drive(fakeRequest({ body: JSON.stringify({ text: '草稿' }) }))
+  assert.equal(plainResult.status, 200)
+  assert.equal(plain.calls[0].reasoningEffort, undefined)
+  assert.equal(plain.logs.some(entry => entry.level === 'warn'), false, '不支持思考不该刷告警')
+})
+
+await test('catalog / catalog.models / check 如实下发思考强度信息', async () => {
+  setup({}, {
+    selection: { provider: 'p', model: 'm' },
+    models: [{ id: 'm1', name: 'M1', reasoning: REASONING_INFO.reasoning }],
+    resolveInfo: REASONING_INFO,
+    settingsSection: { defaultReasoningEffort: 'medium' },
+  })
+  const catalog = await drivePath(ROUTE_CATALOG, fakeRequest({ method: 'GET' }))
+  assert.equal(catalog.status, 200)
+  assert.equal(catalog.json.effective.reasoningEffort, 'medium')
+  assert.equal('modelReasoningEfforts' in catalog.json.effective, false, '没有按模型覆盖这回事')
+  assert.deepEqual(catalog.json.limits.reasoningEfforts, [...REASONING_EFFORT_SUGGESTIONS])
+  assert.equal(catalog.json.defaults.reasoningEffort, 'low')
+
+  const listed = await drivePath(ROUTE_CATALOG_MODELS, fakeRequest({ method: 'GET', url: '/x?provider=p' }))
+  assert.deepEqual(listed.json.models[0].efforts, ['low', 'high'])
+  assert.equal(listed.json.models[0].defaultEffort, 'high')
+
+  const checked = await drivePath(ROUTE_CHECK, fakeRequest({ method: 'POST', body: '{"provider":"p","model":"m"}' }))
+  assert.deepEqual(checked.json.efforts, ['low', 'high'])
 })
 
 console.log('')

@@ -54,6 +54,15 @@ export declare const PROMPT_PROFILES_FIELD = 'promptProfiles'
 export declare const ACTIVE_PROFILE_FIELD = 'activeProfileId'
 /** 设置段里"是否把模型思考过程透传给浏览器"的字段名（未设置 = 默认开）。 */
 export declare const SHOW_REASONING_FIELD = 'showReasoning'
+/** 设置段里"思考强度"的字段名（调用参数之一；未设置 = 内置 low）。 */
+export declare const DEFAULT_REASONING_EFFORT_FIELD = 'defaultReasoningEffort'
+/** 内置默认思考强度。 */
+export declare const DEFAULT_REASONING_EFFORT = 'low'
+/**
+ * 设置页 datalist 用的**建议**强度 id（不是白名单）。
+ * 强度 id 归适配器所有（opaque），用户填别的值一样合法——可用性由模型公布的能力决定。
+ */
+export declare const REASONING_EFFORT_SUGGESTIONS: readonly ['minimal', 'low', 'medium', 'high']
 /** 追加提示词数量上限。 */
 export declare const MAX_PROMPT_PROFILES = 20
 
@@ -78,6 +87,12 @@ export interface BetterInputSettingsSection {
    * 关掉时宿主根本不发 `reasoning` 事件（思考正文不出宿主）。
    */
   showReasoning?: boolean
+  /**
+   * 优化时使用的**思考强度**（reasoning effort），归在「调用参数」里，对所有模型生效。
+   * 未设置 = 内置 `low`。取值是适配器所有的不透明字符串；宿主会在调模型前用模型公布的能力核对，
+   * 用不了就回落到适配器默认。
+   */
+  defaultReasoningEffort?: string
   /** 多条追加提示词；`activeProfileId` 指向其中之一（或内置条目 id）时它的正文会追加到系统提示词之后。 */
   promptProfiles?: PromptProfile[]
   /** 当前启用的追加条目 id；空串/缺省 = 不追加。 */
@@ -136,6 +151,8 @@ export declare function effectiveConfig(
   timeoutMs: number
   /** 是否透传思考过程（P11）：默认 `true`，只有设置段里显式的 `false` 才关。 */
   showReasoning: boolean
+  /** 生效的思考强度（调用参数之一，未设置 = 内置 `low`）。**永远有值**。 */
+  reasoningEffort: string
   /** 合并后的追加提示词清单（内置种子在前）；正文只在宿主用，catalog 行由 profileRowsOf 裁剪。 */
   profiles: ReadonlyArray<{
     id: string, label: string, prompt: string,

@@ -195,13 +195,24 @@ export interface BetterInputSettingsInjected {
       /** 追加提示词行（内置种子在前）：只有 id/名称/来源/是否内置，正文留在宿主。 */
       profiles?: Array<{ id: string, name: string, source?: string, builtIn?: boolean }>
       /** 内置/组合层的默认系统提示词：设置页要"可见可编辑"，这一段有意下发。 */
-      defaults?: { systemPrompt?: string }
+      defaults?: { systemPrompt?: string, reasoningEffort?: string }
+      /** 区间与建议清单（单一事实来源）：`reasoningEfforts` 是思考强度的**建议**值，不是白名单。 */
+      limits?: { reasoningEfforts?: string[] } & Record<string, unknown>
       /** 插件配置文件的绝对路径（宿主按自己的模块位置解析），给「打开配置文件」用。 */
       configPath?: string
       effective?: Record<string, unknown>
     }>
-    models: (provider: string) => Promise<Array<{ id: string, name: string }>>
-    check: (provider: string, model: string) => Promise<{ ok?: boolean, message?: string, name?: string, context?: number, defaultMaxTokens?: number }>
+    models: (provider: string) => Promise<Array<{ id: string, name: string, efforts?: string[], defaultEffort?: string }>>
+    check: (provider: string, model: string) => Promise<{
+      ok?: boolean
+      message?: string
+      name?: string
+      context?: number
+      defaultMaxTokens?: number
+      /** 该模型公布的思考强度与它自己的默认值（没有就不带）。 */
+      efforts?: string[]
+      defaultEffort?: string
+    }>
     /**
      * 请宿主用系统默认程序打开插件配置文件。
      * 失败时 `message` 是宿主给的可展示原因（找不到文件 / 平台不支持 / 起不来），一定带绝对路径。

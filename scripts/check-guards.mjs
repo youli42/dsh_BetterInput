@@ -201,6 +201,13 @@ const checks = [
     file: 'lib/client.js',
     must: /UNIVERSAL_EXCLUDE_SELECTORS/,
   },
+  {
+    why: '思考强度必须经模型能力核对后再传：dsh-llm 的 resolveCallWithInfo 对"模型不公布该强度却收到显式 '
+      + 'reasoningEffort"直接抛 UNSUPPORTED_REASONING_EFFORT，而默认值 low 是对**所有**模型生效的——'
+      + '绕过核对直接透传会把不支持思考的模型整条打成 502（一个纯设置项不该有这种杀伤力）',
+    file: 'lib/index.js',
+    must: /const reasoningEffort = await resolveEffort\(/,
+  },
 ]
 
 /** 客户端不许出现"与宿主同值"的区间字面量（只允许兜底常量里出现）。 */

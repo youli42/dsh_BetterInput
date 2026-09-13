@@ -35,9 +35,10 @@ DSH Web GUI 插件：在**模型选择器左侧**加一个「AI 优化输入」�
 | P11 | **进度与思考过程**：优化中显示「阶段 + 耗时 + 字数」，并把模型的思考增量透传成「思考过程」面板 | ✅ 已实现（2026-09-11） |
 | P12 | **控件收敛**：工具行只留 ✦ 与 ▾，撤销与思考回看收进 ▾ 菜单的「本次调用」分区；▾ 常驻并带"可撤销"角标；成功不再弹提示 | ✅ 已实现（2026-09-11） |
 | P13 | **通用输入角标**：主输入框之外的每个输入窗口（页面上的 `textarea` / 显式报名的控件）也挂一枚 ✦ 角标，点击即优化该输入框，成功后可 ↶ 撤销 | ✅ 已实现（2026-09-13） |
+| P14 | **思考强度**：设置页「调用参数」里可配优化时用的思考强度（内置默认 `low`）；宿主按模型公布的能力核对后才透传，模型不支持则回落适配器默认 | ✅ 已实现（2026-09-13） |
 | P5.7b / P5.7c / P5.8 | typecheck（缺 tsc）、vitest+jsdom、芯片保留 | ⬜ 待做（见「下一步」与「工程化」） |
 
-检查：lint 零发现 · 约定守卫 28 条 · 测试 70 + 78 + 6 + 15 + 6 = 175 例，全绿
+检查：lint 零发现 · 约定守卫 29 条 · 测试 76 + 82 + 6 + 15 + 7 = 186 例，全绿
 （`npm run verify` = lint + 全部检查；`npm test` 会先自动补齐 dev 依赖链接）。
 
 > **运行前提**：仓库里没有 `node_modules` 时，`npm test` 与 `link:` 方式安装后的运行时都跑不起来
@@ -51,19 +52,19 @@ biome.json            lint 配置（只 lint 不 format，见「工程化」）
 cordis.patch.yml      bundle patch + 组合层配置（设置页的用户值优先于它）
 lib/index.js          宿主半：6 条路由（一次性 JSON + 流式 SSE + 目录/试调 + 打开配置文件）+ LLM 调用 + 并发闸门
 lib/settings.js       宿主半：设置命名空间 schema 与跨字段校验（注册挂在 settings 就绪时）
-lib/policy.js         策略层：零依赖，配置校验/信任围栏/生效配置解析/风格提示词分层/追加提示词/显示思考过程（可独立单测）
+lib/policy.js         策略层：零依赖，配置校验/信任围栏/生效配置解析/风格提示词分层/追加提示词/显示思考过程/思考强度（可独立单测）
 lib/client.js         浏览器半：输入框按钮 + ▾ 统一菜单（撤销 / 思考回看 / 追加提示词 / 预设）+ 撤销栈 + 进度行与思考面板 + 通用输入角标（P13）+ 设置页（手写 __ModuleLoader__ bundle）
 lib/types/*.d.ts      对外类型
 .perf/                Web 启动耗时基准脚本与测量报告（README.md 有方法与原始数据）
-scripts/check-guards.mjs  约定守卫：把踩过的坑变成可自动检查的规则（28 条）
+scripts/check-guards.mjs  约定守卫：把踩过的坑变成可自动检查的规则（29 条）
 scripts/dsh-packages.mjs  定位 dsh 安装与其中的宿主包（脚本与测试共用）
 scripts/link-dev-deps.mjs 把宿主依赖软链进本仓库（`npm test` 前自动跑；CI 里自动跳过）
 scripts/lint.mjs      找 Biome 并跑 lint（仓库内 / 全局安装都能用）
-test/smoke.mjs        宿主半冒烟测试（70 例）
-test/client.smoke.mjs 浏览器半冒烟测试（78 例：接线、控件收敛、流式回填、进度行与思考面板、统一菜单、撤销栈、设置页紧凑布局）
+test/smoke.mjs        宿主半冒烟测试（76 例）
+test/client.smoke.mjs 浏览器半冒烟测试（82 例：接线、控件收敛、流式回填、进度行与思考面板、统一菜单、撤销栈、设置页紧凑布局与思考强度）
 test/client.react.mjs 真 React 渲染测试（6 例：真 react/react-dom SSR，含"不得有 React 警告"）
 test/client.universal.mjs 通用输入角标测试（15 例：自带小 DOM 替身，覆盖扫描/定位/遮挡/写回/取消/手改/失败/回退/动态挂摘/卸载）
-test/settings-activation.mjs 真框架集成测试（6 例：真实 cordis + 真实 settings 提供者，含追加提示词、思考透传全链路）
+test/settings-activation.mjs 真框架集成测试（7 例：真实 cordis + 真实 settings 提供者，含追加提示词、思考透传、思考强度全链路）
 .github/workflows/ci.yml  CI：lint + 约定守卫 + 五个套件（Windows）
 DESIGN.md             设计依据：座位/接口证据、撤销追加提示词、提示词分层、风险清单
 LICENSE               MIT
@@ -549,7 +550,8 @@ P6.1/P6.2 时代的「优化风格」是**可多选**的改写口味：▾ 菜�
 │   ○ 转规格    内置追加文案（内置默认）              [编辑]    │
 │   ○ 周报      你是周报写手…                       [编辑][删除]│
 ├ 模型             acme / m1（设置页）                [编辑] ┤
-├ 调用参数         温度 默认 · 上限 1024 · 超时 30000ms [编辑] ┤
+├ 调用参数         温度 默认 · 上限 1024 · 超时 30000ms
+│                   · 思考强度 low                     [编辑] ┤
 └ 配置文件：…\cordis.patch.yml ────────────────────────────────┘
 ```
 
@@ -559,7 +561,8 @@ P6.1/P6.2 时代的「优化风格」是**可多选**的改写口味：▾ 菜�
 - **行距压到最小**：正文 12px / 行高 1.45，分组间距 8px，组头 24px，清单行 22px——
   四个分组 + 清单 + 操作条在一屏内同时可见，不必滚动。
 - **一屏看全**：每个分组标题右侧是一行**只读摘要**（当前生效值，如「自定义 · 42 字」「acme / m1（设置页）」
-  「温度 默认 · 上限 1024 · 超时 30000ms」「周报」），收起状态也能看清现在用的是什么。
+  「温度 默认 · 上限 1024 · 超时 30000ms · 思考强度 low」「周报」），
+  收起状态也能看清现在用的是什么。
 - **操作条常驻顶部**：保存 / 恢复默认配置 / 打开插件配置文件不用滚到底部去找。
 - **校验失败自动展开**：出错的分组（含追加提示词的某一行）会自动展开并显示错误——折叠状态下的
   "错误提示被藏起来"是这套布局最容易出的事故，有专门用例钉住（`groupsWithErrors`）。
@@ -572,7 +575,7 @@ P6.1/P6.2 时代的「优化风格」是**可多选**的改写口味：▾ 菜�
 | 系统提示词 | 「使用自定义系统提示词」开关 + 正文 + 「查看默认系统提示词」 | 开关关闭时用插件配置的 `systemPrompt`，再往下才是内置文案；这一段是**基底**，永远会发给模型。默认正文可展开查看，并能「以默认为基础编辑」一键填入 |
 | 追加提示词 | 内置条目（**精简 / 转规格**，名称固定、可改内容、不可删）+ 多条自定义条目（名称 + 正文，可增删），单选「启用」 | 选中的那条接在系统提示词之后（`本次额外要求（名称）：正文`）；输入框旁 `▾` 菜单里随时切换。内置条目留空 = 用内置追加文案，填写 = 用你写的追加文案。见「追加提示词」一节 |
 | 模型 | Provider + 模型名称 + 「测试」 | 输入框带候选（datalist）：目录来自宿主已注册的适配器；目录为空或想用未列出的模型时**直接手填**。「测试」走宿主 `resolveModelInfo` 只做解析校验，不发真实请求、不产生费用 |
-| 调用参数 | Temperature、输出 token 上限、超时（毫秒）、**显示思考过程**（P11） | 前三个留空 = 用适配器/组合配置/内置默认；「显示思考过程」默认勾选，取消后宿主不再把模型的思考内容发给浏览器（见「进度与思考过程」） |
+| 调用参数 | Temperature、输出 token 上限、超时（毫秒）、**思考强度**（P14）、**显示思考过程**（P11） | 前三个留空 = 用适配器/组合配置/内置默认；「思考强度」留空 = 内置 `low`，它是适配器所有的不透明 id（建议值 `minimal`/`low`/`medium`/`high`，可手填），宿主调模型前会核对模型公布的能力、不支持就**省略并回落适配器默认**（不会让调用失败，`/catalog` 的 `effective.reasoningEffort` 可查生效值）；「显示思考过程」默认勾选，取消后宿主不再把模型的思考内容发给浏览器（见「进度与思考过程」） |
 | 操作 | 保存 / 恢复默认配置 / 打开插件配置文件 | 「恢复默认配置」先确认，再清空本页**所有**用户设置（含追加提示词与内置覆盖）；「打开插件配置文件」见上节 |
 
 **两层的取值**：**系统提示词**（基底）= 自定义开关 → `cordis.patch.yml` 的 `config.systemPrompt` → 内置默认；
@@ -591,6 +594,8 @@ P6.1/P6.2 时代的「优化风格」是**可多选**的改写口味：▾ 菜�
 - Temperature 不在 0–2、输出上限不在 1–200000、超时不在 1000–600000 ms、非整数 → 拒绝；
 - 追加提示词：超过 20 套、某项缺名称/缺正文、id 重复、`activeProfileId` 指向不存在的追加提示词 → 拒绝
   （全空的行不算——那是"刚点新增还没填"，保存时自动丢弃）。
+- 思考强度（P14）：必须是文本（空串 = 未设置 = 内置 `low`）；取值本身不做白名单——
+  强度 id 归适配器所有，可用性由宿主按模型公布的能力核对。
 
 > **宿主拒绝时不会抛错**：`settingsScope.mutate()` 内部在 `!response.ok` 时只 `recover()` 然后正常返回
 > （只有装配错误才 reject），所以"保存成功"必须由调用方自己核对镜像里的值是否真的变了。
@@ -618,6 +623,7 @@ P6.1/P6.2 时代的「优化风格」是**可多选**的改写口味：▾ 菜�
 | `model.provider` / `model.model` | 省略 | 固定模型路由；**必须成对出现**。被设置页覆盖；都没配时用宿主当前默认选择 |
 | `presets[].{id,label,prompt}` | `[]` | 预设；请求带 `presetId` 时其 `prompt` 追加到 system。`id`/`label` 会经 `/catalog` 下发到输入框旁的 `▾` 菜单（`prompt` 不下发）。**id 命中内置条目**（`concise`/`spec`）时语义不同：它是那条内置条目的**追加文案的组合层默认值**（被遗留设置字段与设置页覆盖），且不再列进预设区。见「追加提示词」一节 |
 | `stylePromptConcise` / `stylePromptSpec`（**用户设置**，非本文件） | 空 | 逐风格提示词，写在设置页里；这里列出来只是说明它压过 `presets` 里同 id 的那一项 |
+| `defaultReasoningEffort`（**用户设置**，非本文件） | `low` | P14：优化时用的思考强度，归在「调用参数」里、对所有模型生效。未设置 = 内置 `low`；取值不做白名单，宿主核对模型公布的能力后才透传，不支持则省略并回落适配器默认 |
 | `maxInputChars` | `8000` | 输入字数上限（超限 400） |
 | `maxOutputTokens` | `1024` | 输出 token 上限，**取值域 1–200000**（截断仍返回文本并标 `truncated: true`） |
 | `timeoutMs` | `30000` | 单次调用超时，**取值域 1000–600000 ms**（超时 504） |
@@ -665,28 +671,31 @@ GET  /api/dsh-input-optimizer/catalog
 200 { namespace,
       settings: { available, reason?, section },
       providers: [{id,name}],
-      limits: { maxInputChars, temperature:{min,max}, maxOutputTokens:{min,max}, timeoutMs:{min,max} },
+      limits: { maxInputChars, temperature:{min,max}, maxOutputTokens:{min,max}, timeoutMs:{min,max},
+                reasoningEfforts:[...] },      // P14：思考强度的**建议**值（不是白名单；可用性由模型能力决定）
       presets: [{id,label}],                  // prompt 不下发；客户端不再自己维护规则镜像
       styles: [{id,label,source}],            // 仅为旧客户端保留的兼容面；prompt 同样不下发
       profiles: [{id,name,source,builtIn}],   // 追加提示词清单行（内置条目在前）；正文不下发（profileRowsOf 保证）
-      defaults: { systemPrompt },             // 内置/组合层默认系统提示词：有意下发，设置页要"可见"
+      defaults: { systemPrompt, reasoningEffort },  // 内置默认系统提示词 / 内置默认思考强度（low）
       configPath,                             // 插件配置文件绝对路径（给「打开配置文件」用）
       effective: { provider, model, temperature, maxOutputTokens, timeoutMs,
                    showReasoning,            // P11：是否透传思考过程（默认 true，只有设置页关掉才 false）
+                   reasoningEffort,          // P14：生效的思考强度（调用参数；未设置 = 内置 low，永远有值）
                    profileId,                 // 启用中的追加提示词 id；null = 未启用（不追加）
                    sources: { prompt, model, temperature, limits } } }
                                               // sources.prompt 说的是**基底系统提示词**来自哪一层
                                               // （settings/config/default）；追加条目不改它
 
 GET  /api/dsh-input-optimizer/catalog/models?provider=<id>
-200 { provider, models: [{id,name}] }        // 适配器没有目录时 models 为空数组，不是错误
+200 { provider, models: [{id,name,efforts?,defaultEffort?}] }  // 适配器没有目录时 models 为空数组，不是错误
 400 { error: 'missing-provider', message }
 502 { error: 'catalog-failed', message }     // provider 未注册（listModels 抛 NO_ADAPTER）
 
 POST /api/dsh-input-optimizer/check
 body: { provider: string, model: string }
-200 { ok: true, provider, model, name, context?, defaultMaxTokens? }
+200 { ok: true, provider, model, name, context?, defaultMaxTokens?, efforts?, defaultEffort? }
     // context 取自 LlmResolvedModelInfo.context.contextWindow（该字段是对象，不是数字）
+    // efforts/defaultEffort 取自 LlmResolvedModelInfo.reasoning（P14；模型不公布思考强度时缺席）
 200 { ok: false, provider, model, message }  // 解析不了的原因（不发真实请求、不计费）
 400 { error: 'missing-model', message }
 

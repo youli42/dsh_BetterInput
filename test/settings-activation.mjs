@@ -88,7 +88,8 @@ const TMP_PARENT = writableParent()
  *
  * `webServer`/`llm` 用替身（只为让插件通过 `inject` 门，路由注册被捕获下来），
  * settings 提供者则按需挂**真实的** `dsh-settings-file`（写到临时文档，不碰用户配置）。
- * @param {{ settings?: 'before' | 'after' | 'never', config?: object, chunks?: object[] }} options - 提供者挂载时机与插件组合配置。
+ * @param {{ settings?: 'before' | 'after' | 'never', config?: object, chunks?: object[],
+ *   reasoning?: object }} options - 提供者挂载时机、插件组合配置与模型公布的思考强度。
  * @returns {Promise<{ ctx: object, routes: object[], calls: object[], documentPath: string,
  *   dispose: () => Promise<void> }>} 句柄（`calls` 是每次 LLM 调用的入参，用来核对 system prompt）。
  */
@@ -128,7 +129,13 @@ async function boot(options = {}) {
         },
         listProviders: () => [],
         listModels: async () => [],
-        resolveModelInfo: async (provider, model) => ({ provider, model, name: model }),
+        // `reasoning` 让用例声明"这个模型公布哪些思考强度"（P14 的能力核对靠它）。
+        resolveModelInfo: async (provider, model) => ({
+          provider,
+          model,
+          name: model,
+          ...options.reasoning === undefined ? {} : { reasoning: options.reasoning },
+        }),
       })
     },
   })
@@ -471,6 +478,48 @@ await test('思考过程透传（P11）：真实设置文档 → 真实 schema �
     }
     const catalog = await drive(host.routes, ROUTE_CATALOG, 'GET')
     assert.equal(catalog.json.effective.showReasoning, false, '字符串 "false" 不得让思考内容继续下发')
+  } finally {
+    await host.dispose()
+  }
+})
+
+await test('思考强度（P14）：真实设置文档 → 真实 schema → 真的传给模型（全链路）', async () => {
+  const host = await boot({
+    settings: 'after',
+    // 固定模型路由，否则 /optimize 会先以 502 no-model-route 结束，走不到 LLM。
+    config: { systemPrompt: 'BASE', model: { provider: 'p', model: 'm' } },
+    // 模型公布 low/high 两个强度（能力核对据此决定传不传）。
+    reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], defaultEffort: 'high' },
+  })
+  try {
+    // 还没配过 → 用**内置默认 low**，而且真的传给了模型。
+    await drive(host.routes, ROUTE, 'POST', { text: '写个脚本' })
+    assert.equal(host.calls.at(-1).reasoningEffort, 'low', '未配置时必须用内置默认思考强度')
+
+    // 走真实 settings 服务的写入通道（客户端设置页落盘的正是这一层）：
+    // schema 里没有这个字段的话，这次 update 会当场失败——这条断言钉的正是"字段两端同源"。
+    await host.ctx.settings.update(SETTINGS_NAMESPACE, { defaultReasoningEffort: 'high' })
+    await settle(30)
+    assert.equal(
+      readFileSync(host.documentPath, 'utf8').includes('defaultReasoningEffort'),
+      true,
+      '思考强度必须真的落进设置文档',
+    )
+
+    const catalog = await drive(host.routes, ROUTE_CATALOG, 'GET')
+    assert.equal(catalog.json.effective.reasoningEffort, 'high')
+    assert.equal('modelReasoningEfforts' in catalog.json.effective, false, '它就是一个调用参数，没有按模型覆盖')
+
+    // 下一次请求用设置里的值（对所有模型生效）。
+    await drive(host.routes, ROUTE, 'POST', { text: '写个脚本' })
+    assert.equal(host.calls.at(-1).reasoningEffort, 'high', '设置里的思考强度必须真的传给模型')
+
+    // 换成另一个模型 → 还是同一个思考强度（它是调用参数，不分模型）。
+    await host.ctx.settings.update(SETTINGS_NAMESPACE, { modelProvider: 'p', modelId: 'm2' })
+    await settle(30)
+    await drive(host.routes, ROUTE, 'POST', { text: '写个脚本' })
+    assert.equal(host.calls.at(-1).model, 'm2')
+    assert.equal(host.calls.at(-1).reasoningEffort, 'high', '思考强度对所有模型一视同仁')
   } finally {
     await host.dispose()
   }

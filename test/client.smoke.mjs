@@ -17,6 +17,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 import {
+  REASONING_EFFORT_SUGGESTIONS,
   SETTINGS_FIELD_KEYS,
   STYLE_IDS as HOST_STYLE_IDS,
   STYLE_PROMPT_FIELDS,
@@ -2056,6 +2057,100 @@ await test('显示思考过程：默认勾选、关掉写 false、再勾回来�
   assert.equal(untouched.scope.mutations.length, 0, '默认值不该被写进设置文档')
   assert.equal(untouched.view().noteText, 'settings.noChange')
 })
+console.log('client half: 思考强度（P14，归在「调用参数」里）')
+await test('思考强度落在「调用参数」分组里（没有独立分组），留空 = 内置 low', async () => {
+  const page = mountSettings({ settingsValue: {} })
+  // 分组清单里没有独立的「思考强度」分组：它就在「调用参数」里面。
+  assert.equal(page.view().expands.has('reasoning'), false, '不应再有独立的思考强度分组')
+  const view = page.open('params')
+  assert.equal(view.inputs.get('defaultReasoningEffort').props.value, '')
+  assert.equal(
+    view.inputs.get('defaultReasoningEffort').props.placeholder,
+    'settings.params.reasoningEffortPlaceholder',
+  )
+})
+await test('思考强度：填了发 set，清空发 unset（不往设置文档里塞默认值）', async () => {
+  const page = mountSettings({ settingsValue: {} })
+  let view = page.open('params')
+  view.inputs.get('defaultReasoningEffort').props.onChange({ target: { value: 'high' } })
+  await page.view().action('save').props.onClick()
+  assert.deepEqual(page.scope.mutations[0].ops, [
+    { op: 'set', path: ['defaultReasoningEffort'], value: 'high' },
+  ])
+
+  const stored = mountSettings({ settingsValue: { defaultReasoningEffort: 'high' } })
+  view = stored.open('params')
+  assert.equal(view.inputs.get('defaultReasoningEffort').props.value, 'high')
+  view.inputs.get('defaultReasoningEffort').props.onChange({ target: { value: '' } })
+  await stored.view().action('save').props.onClick()
+  assert.deepEqual(stored.scope.mutations[0].ops, [{ op: 'unset', path: ['defaultReasoningEffort'] }])
+
+  // 空着（未设置）保存 = 没有改动。
+  const untouched = mountSettings({ settingsValue: {} })
+  untouched.open('params')
+  await untouched.view().action('save').props.onClick()
+  assert.equal(untouched.scope.mutations.length, 0)
+})
+await test('思考强度摘要：调用参数的摘要行里能看到生效值', async () => {
+  // 摘要与其他调用参数一样取**宿主下发的生效值**（不是表单里的草稿）。
+  const page = mountSettings({
+    catalog: {
+      namespace: SETTINGS_NAMESPACE,
+      settings: { available: true, section: {} },
+      providers: [],
+      profiles: [],
+      effective: {
+        provider: null,
+        model: null,
+        temperature: null,
+        maxOutputTokens: 1024,
+        timeoutMs: 30000,
+        reasoningEffort: 'high',
+      },
+    },
+  })
+  page.view()
+  await tick()
+  const view = page.view()
+  const badge = byProp(view.node, 'data-dsh-bi-badge')
+    .find(element => element.props['data-dsh-bi-badge'] === 'params')
+  assert.ok(badge !== undefined, '调用参数分组必须有摘要')
+  const text = childrenOf(badge)[0]
+  assert.equal(text.includes('high'), true, '摘要要能看出当前生效的思考强度')
+})
+await test('思考强度建议清单：以宿主下发为准，宿主没到用兜底（与宿主常量对拍）', async () => {
+  const page = mountSettings({
+    catalog: {
+      namespace: SETTINGS_NAMESPACE,
+      settings: { available: true, section: {} },
+      providers: [],
+      limits: {
+        maxInputChars: 100,
+        temperature: { min: 0, max: 2 },
+        maxOutputTokens: { min: 1, max: 1000 },
+        timeoutMs: { min: 1000, max: 60000 },
+        reasoningEfforts: ['x', 'y'],
+      },
+      presets: [],
+      profiles: [],
+      effective: { provider: null, model: null, temperature: null, maxOutputTokens: 1024, timeoutMs: 30000 },
+    },
+  })
+  page.view()   // 首屏渲染一次，目录副作用才会真的发出去（tick 只推微任务）
+  await tick()
+  const fromHost = page.open('params').datalists.get('dsh-bi-reasoning-efforts')
+  assert.deepEqual(childrenOf(fromHost).map(option => option.props.value), ['x', 'y'])
+
+  // 宿主没下发（离线/旧宿主）时的兜底必须与宿主常量一致——镜像漂移靠这条用例拦住。
+  const fallback = mountSettings({ settingsValue: {} })
+  fallback.view()
+  await tick()
+  const list = fallback.open('params').datalists.get('dsh-bi-reasoning-efforts')
+  assert.deepEqual(
+    childrenOf(list).map(option => option.props.value),
+    [...REASONING_EFFORT_SUGGESTIONS],
+  )
+})
 await test('没有改动时保存不发请求，只提示', async () => {  const page = mountSettings({ settingsValue: { systemPrompt: '不变的' } })
   await page.view().action('save').props.onClick()
   assert.equal(page.scope.mutations.length, 0)
@@ -2164,13 +2259,14 @@ await test('恢复默认配置：对所有字段发 unset（含追加提示词�
   await page.view().action('reset').props.onClick()
   assert.equal(page.scope.mutations.length, 1)
   const { ops } = page.scope.mutations[0]
-  // 10 个通用字段（含追加提示词列表、启用 id 与 P11 的显示思考过程）+ 每个优化风格 1 个提示词字段。
+  // 11 个通用字段（含追加提示词列表、启用 id、P11 的显示思考过程与 P14 的思考强度）+ 每个优化风格 1 个提示词字段。
   // 重置必须连追加提示词一起清掉，否则"恢复默认配置"会留下改不掉的追加提示词。
-  assert.equal(ops.length, 10 + HOST_STYLE_IDS.length)
+  assert.equal(ops.length, 11 + HOST_STYLE_IDS.length)
   assert.equal(ops.every(op => op.op === 'unset'), true)
   assert.deepEqual(ops.map(op => op.path[0]).sort(), [
     'customPromptEnabled', 'maxOutputTokens', 'modelId', 'modelProvider', 'systemPrompt', 'temperature', 'timeoutMs',
     'showReasoning',
+    'defaultReasoningEffort',
     'promptProfiles', 'activeProfileId',
     ...HOST_STYLE_FIELDS,
   ].sort())
