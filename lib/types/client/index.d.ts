@@ -84,6 +84,57 @@ export interface BetterInputBehavior {
 /** 需要就绪的客户端服务。 */
 export declare const inject: readonly ['slots', 'locale', 'settingsScope']
 
+/* ── 通用输入角标（P13）：主输入框之外的每个输入窗口 ─────────────────────── */
+
+/** 一个宿主记录：输入窗口 + 它的角标 / 撤销角标 / 提示条。 */
+export interface UniversalBadgeRecord {
+  /** 宿主要素（textarea 或显式报名的元素）。 */
+  host: Element
+  /** 优化角标（点击优化；生成中点击 = 取消）。 */
+  badge: HTMLElement
+  /** 撤销角标（成功后才显示）。 */
+  undoBadge: HTMLElement
+  /** 提示条（错误/警告/成功说明）。 */
+  note: HTMLElement
+  /** 角标状态：idle（未调用）/ running / ok / error。 */
+  state: 'idle' | 'running' | 'ok' | 'error'
+}
+
+/**
+ * 通用角标控制器。
+ *
+ * 契约（与实现、test/client.universal.mjs 一一对应）：
+ * - 宿主 = 页面上的 `textarea`（多行文本 = DSH 里"人话输入"的标准控件）**或**任何带
+ *   `data-dsh-better-input-host` 的元素；`input` 单选/数字框默认不挂。
+ * - 只读 / 禁用 / 被 `data-dsh-better-input-skip` 覆盖 / 在本插件自己的界面里的元素不挂。
+ * - 角标贴在宿主右上角（视口坐标）；太小或滚出视口时隐藏，滚动/缩放/DOM 变化后重排。
+ * - 写回走**平台原生 value setter + 冒泡 input 事件**（受控组件不会与 DOM 漂移）。
+ * - 走与主按钮相同的宿主路由（流式，不可用自动回退一次性 JSON）；CAS 与撤销语义一致。
+ * - 卸载时摘掉全部角标、断开观察器、停掉计时器，不留监听器与计时器。
+ */
+export interface UniversalBadges {
+  /** 当前挂着的宿主记录（键 = 宿主要素）。 */
+  readonly records: Map<Element, UniversalBadgeRecord>
+  /** 全量扫描（新宿主挂、消失的摘）。 */
+  scan: () => void
+  /** 按宿主当前矩形重排角标。 */
+  reposition: () => void
+  /** 卸载（插件卸载 / HMR 重载时调用）。 */
+  uninstall: () => void
+  /** 是否已卸载。 */
+  isDisposed: () => boolean
+}
+
+/**
+ * 造一个通用角标控制器（环境不完整——无 `body` / 无选择器支持——时返回 null）。
+ * `apply()` 持有一个；测试与排查脚本可用 bundle 暴露的 `universal.create` 自建。
+ */
+export declare function createUniversalBadges(options: {
+  t: (key: string) => string
+  win?: unknown
+  doc?: unknown
+}): UniversalBadges | null
+
 /**
  * 浏览器半入口：注册输入框按钮（`conversation.input.right`）与设置页分区（`settings.section`）。
  * @param ctx - 浏览器端 cordis 上下文。

@@ -169,6 +169,38 @@ const checks = [
     forbid: /if \(profiles\.length > 0 \|\| oneShotPresets\.length > 0\)/,
     must: /hasInvocation/,
   },
+  {
+    why: '通用输入角标写回受控组件必须派发一个**冒泡的 input 事件**：第三方插件的输入窗口几乎都是'
+      + 'React 受控的，直接 `element.value = x` 会被它的 value tracker 忽略，组件 state 停在旧文本，'
+      + '下一次渲染就把优化结果覆盖回去（看起来像"点了没反应"）',
+    file: 'lib/client.js',
+    must: /Event\('input', \{ bubbles: true \}\)/,
+  },
+  {
+    why: '（同上）光造事件不够，必须真的派发出去',
+    file: 'lib/client.js',
+    must: /dispatchEvent\(event\)/,
+  },
+  {
+    why: '通用角标的 CAS 判定必须排在写入节流**之前**：反过来的话，"用户手改后的 80ms 内又到一个增量"'
+      + '那一段里写入会因节流直接返回成功，手改要等下一次超出窗口的写入才被发现——那段时间里'
+      + '编辑器还在被人改，而我们以为一切正常',
+    file: 'lib/client.js',
+    must: /const write = \(text, force\) => \{\s+if \(!own\.has\(/,
+  },
+  {
+    why: '通用角标必须给宿主留逃生口（data-dsh-better-input-skip）：DOM 层的注入没有框架契约兜底，'
+      + '某个插件的输入框被挂角标反而碍事时，必须有一行 HTML 就能关掉的办法',
+    file: 'lib/client.js',
+    must: /UNIVERSAL_SKIP_ATTR/,
+  },
+  {
+    why: '通用角标必须排除本插件自己的界面（设置页与主按钮工具行）与主输入框（composer）：设置页的提示词'
+      + '输入框是插件自己的受控表单，给它挂角标会在自己的受控表单上做 DOM 写入；composer 已经有自己的 ✦ 按钮，'
+      + '旧版本/降级态若渲染 textarea，就会多出一枚重复的入口',
+    file: 'lib/client.js',
+    must: /UNIVERSAL_EXCLUDE_SELECTORS/,
+  },
 ]
 
 /** 客户端不许出现"与宿主同值"的区间字面量（只允许兜底常量里出现）。 */

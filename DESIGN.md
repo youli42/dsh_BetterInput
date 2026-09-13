@@ -36,6 +36,7 @@
 | `lib/types/*.d.ts` | 对外契约类型（含组件行为契约、设置段字段） |
 | `scripts/link-dev-deps.mjs` | 把宿主的 `@deepseek-ai/*` 软链进本仓库（`pretest` 自动跑；`link:` 安装的运行时同样必需） |
 | `test/smoke.mjs`（49 例）、`test/client.smoke.mjs`（48 例）、`test/client.react.mjs`（6 例）、`test/settings-activation.mjs`（3 例） | 共 106 例，全绿；外加 11 条约定守卫与 Biome lint（`npm run verify`） |
+| `test/client.universal.mjs`（15 例，P13） | 通用输入角标的 DOM 层测试；自带小 DOM 替身，覆盖边界写在文件头 |
 
 **验收证据**：P0 曾在 Web GUI 目视确认（2026-09-10，当时用 `link:D:\SSDWP\AI\dsh\BetterInput` 装入 profile）。
 2026-09-11 复核时发现该路径已不存在、profile 里也没有本插件（bundles 无条目、patch 为空、`node_modules` 无包），
@@ -216,7 +217,7 @@ P1 的路由此后仍需在真机上 curl 一次（单测用假 LLM 流覆盖了
        替身套件负责——不夸大覆盖面。React 版本这里有个坑：dsh 安装里 hoisted `react` 是 18、
        而 `react-dom` 只存在于某个包的嵌套目录（同级 `react` 19）——两者混用会直接抛
        "Incompatible React versions"，所以软链脚本**按配对解析**（以 `react-dom` 的同级 `react` 为准）。
-    · **CI**（`.github/workflows/ci.yml`）：Windows 上跑 lint + 约定守卫 + 四个套件；宿主依赖从 registry 装
+    · **CI**（`.github/workflows/ci.yml`）：Windows 上跑 lint + 约定守卫 + 五个套件；宿主依赖从 registry 装
        （CI 里没有 dsh 安装 → `link-dev-deps` 检测到"已可从仓库解析"就安静跳过）。
        CI 的 react 是 18.3.1、本机那对是 19.2.8，于是真 React 套件**顺带覆盖两个大版本**。
 31. **刻意没做的两件**（写在这里以免被当成遗漏）：
@@ -473,6 +474,63 @@ P1 的路由此后仍需在真机上 curl 一次（单测用假 LLM 流覆盖了
     否则会因为"菜单关着所以当然找不到"而假通过。
     另外替身在每次 `mount()` 时清一次 document 监听：真框架会卸载上一个组件，替身没有卸载语义，
     而 P12 起用例常以"菜单开着"结束，那些死组件的监听会跨用例累积（把上一条测试的断言计数撑爆）。
+
+---
+
+### P13（通用输入角标：把输入优化覆盖到主输入框之外的每个输入窗口，2026-09-13）
+
+71. **需求里"每个输入窗口"这个前提决定了实现层次**：DSH 的插件生态里，每个插件自己渲染自己的输入窗口。
+    框架只给 composer 的输入提供了契约（`conversation.input.*` 座位 + `useInput`/`InputState`/`setDraft`），
+    第三方的自由文本控件**不在任何座位、没有共享 store、客户端 bundle 也不能跨包 `import`**
+    （只能 `require` 平台种子模块）。所以"通用"不可能靠"每个插件配合接入"实现——那正是需求
+    （"下载很多插件"）最不可能满足的事。唯一跨插件可用的共同点是 DOM：这些窗口最终都是 `<textarea>`。
+    选择在 DOM 层做，是需求逼出来的，不是偷懒。
+72. **`textarea` 而不是"所有输入框"**：需求是"人话输入窗口"。DSH 里需要长文本的地方
+    （自由文本问答、消息反馈、第三方表单的多行框）用的都是 `textarea`（实测：`dsh-client-ui-user-questions`、
+    `dsh-client-ui-message-feedback` 都是 `jsx("textarea", …)`）；而单选/数字框优化起来没有意义。
+    所以默认只挂 `textarea`，非 textarea 的控件用 `data-dsh-better-input-host` **显式报名**——
+    这样"覆盖大部分"与"不乱挂"两头都有了，且都不需要改别的插件。
+73. **主输入框天然免疫**：composer 是 Lexical 的 `contenteditable`，不是 `textarea`，所以主按钮与通用角标
+    不会在一个地方出现两个入口。（反面也写清楚：`contenteditable` 一律不挂——往富文本节点里做整体替换，
+    风险远高于收益；要优化主输入框就用它自己的按钮。）
+74. **写回必须走"原生 value setter + 冒泡 input 事件"**：第三方输入窗口几乎都是 React 受控组件。
+    React 在受控节点上装了 value tracker，`element.value = x` 会被它当成"值没变"而丢掉 onChange，
+    组件 state 停在旧文本、下一次渲染就把优化结果覆盖回去——用户看到的现象是"点了没反应"。
+    原型链上的原生 setter 绕过 tracker，`input` 事件再把新值送进 onChange（事件必须冒泡：
+    React 在根节点上做事件委托）。这条踩过的人很多，所以它有一条专门的约定守卫。
+75. **CAS 判定必须排在写入节流之前**（与主按钮的实现有意不同）：主按钮的 `write()` 先判 80ms 节流、
+    后判 CAS，于是"用户手改后的 80ms 内又到一个增量"这一段里，写入会因节流直接返回成功，
+    手改要等下一次超出窗口的写入（或收尾那次 force）才被发现。通用角标把这个顺序反过来：
+    节流只该少写几次，不该少判几次。**没有回头改主按钮**是刻意的——那是另一条已验收的路径，
+    改它要重新验一遍它的 78 例与真机行为，而它的兜底（收尾 force 写入必然判一次）一直有效。
+76. **角标是覆盖层里的浮动元素，不往别人的 DOM 树里插节点**：挂到宿主父节点里（需要给父节点
+    `position: relative`）或宿主内部（`textarea` 不能有子节点）都会**改动别人的 DOM 结构**——
+    React 的协调器一旦重渲染就可能把我们插的节点当成"多余的"清掉。所以角标住在
+    `body` 下一层 `position: fixed; inset: 0; pointer-events: none` 的覆盖层里，
+    用 `getBoundingClientRect()` 每帧贴到宿主右上角；位置在滚动（捕获阶段，输入框常在内部滚动容器里）、
+    缩放、以及 `MutationObserver` 报来的 DOM 变化后重算。代价是要自己做定位，收益是**绝不碰别人的树**。
+    顺带补上了"只看矩形不够"的那一面：对话框/抽屉盖住页面时，底下的输入框矩形还在视口里，
+    角标会浮在**对话框之上**（看起来像跑到别人的窗口上去了）。所以定位阶段再用
+    `document.elementFromPoint()` 取宿主中心点的命中元素，命中宿主/其后代/我们自己的角标层才算可见；
+    环境不支持或取不到时**一律当可见**——这条判据是"少画错"的增强，不该变成"少画"的失败面。
+77. **"够格"与"可见"分两阶段判**：扫描阶段只判结构（tag/只读/禁用/跳过标记），可见性留到定位阶段
+    （rect 太小或滚出视口就隐藏角标）。原因是"面板还没展开时 rect 是 0"——若在扫描阶段就因不可见
+    判定"不够格"，之后就再也没有第二次机会（`MutationObserver` 不会为"尺寸变大"再报一次）。
+    这个顺序在测试里被钉住（同一条记录先隐藏、改矩形 + scroll 事件后显示）。
+78. **逃生口是 DOM 方案的必需品**：没有框架契约兜底，就必然存在"某个插件的输入框挂角标反而碍事"
+    的个案。所以给了 `data-dsh-better-input-skip`（一行 HTML 关掉）与 `data-dsh-better-input-host`
+    （接入非 textarea 控件）两个属性级开关，并且**默认排除本插件自己的界面**
+    （设置页的提示词输入框是自己的受控表单，被别的东西做 DOM 写入会与"编辑中"的表单状态打架）。
+79. **没有会话上下文时的并发语义**：宿主的单航班闸门按 `sessionId` 判定，而通用角标读不到会话
+    （DOM 里没有这个事实）。选择按元素合成一个稳定 id（可用 `data-dsh-better-input-session` 覆盖）：
+    **同一输入窗口不并发、全局上限照旧**（`maxConcurrentCalls`）。比"传 undefined 完全不做单航班判定"
+    更接近用户直觉——同一个框被点两次时，第二次本来就该是"取消"。
+80. **测试用"够真的小 DOM"而不是 jsdom**：这一层的正确性判据很小——够不够格挂、矩形算得对不对、
+    写回有没有派发 input 事件、用户手改有没有被覆盖、动态插入有没有接上、卸载有没有回收——
+    为此拉一整套 jsdom（新依赖 + 与真 React 套件的边界重叠）不划算。`test/client.universal.mjs`
+    自带 15 例与一个约 200 行的 DOM 替身（真正的属性/事件冒泡/`closest`/原型 value 访问器/
+    可控 `MutationObserver` 与定时器），并**如实写明它不覆盖什么**（不跑 React、不测 CSS 视觉）。
+    覆盖边界写在文件头，避免下一轮把"绿了"读成"什么都能保证"。
 
 ---
 

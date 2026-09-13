@@ -34,9 +34,10 @@ DSH Web GUI 插件：在**模型选择器左侧**加一个「AI 优化输入」�
 | P10 | **设置界面重设计**：输入框默认隐藏（点「编辑」才展开）、行距压到最小、四个分组 + 一行摘要同屏可见 | ✅ 已实现（2026-09-11） |
 | P11 | **进度与思考过程**：优化中显示「阶段 + 耗时 + 字数」，并把模型的思考增量透传成「思考过程」面板 | ✅ 已实现（2026-09-11） |
 | P12 | **控件收敛**：工具行只留 ✦ 与 ▾，撤销与思考回看收进 ▾ 菜单的「本次调用」分区；▾ 常驻并带"可撤销"角标；成功不再弹提示 | ✅ 已实现（2026-09-11） |
+| P13 | **通用输入角标**：主输入框之外的每个输入窗口（页面上的 `textarea` / 显式报名的控件）也挂一枚 ✦ 角标，点击即优化该输入框，成功后可 ↶ 撤销 | ✅ 已实现（2026-09-13） |
 | P5.7b / P5.7c / P5.8 | typecheck（缺 tsc）、vitest+jsdom、芯片保留 | ⬜ 待做（见「下一步」与「工程化」） |
 
-检查：lint 零发现 · 约定守卫 23 条 · 测试 70 + 78 + 6 + 6 = 160 例，全绿
+检查：lint 零发现 · 约定守卫 28 条 · 测试 70 + 78 + 6 + 15 + 6 = 175 例，全绿
 （`npm run verify` = lint + 全部检查；`npm test` 会先自动补齐 dev 依赖链接）。
 
 > **运行前提**：仓库里没有 `node_modules` 时，`npm test` 与 `link:` 方式安装后的运行时都跑不起来
@@ -51,18 +52,19 @@ cordis.patch.yml      bundle patch + 组合层配置（设置页的用户值优�
 lib/index.js          宿主半：6 条路由（一次性 JSON + 流式 SSE + 目录/试调 + 打开配置文件）+ LLM 调用 + 并发闸门
 lib/settings.js       宿主半：设置命名空间 schema 与跨字段校验（注册挂在 settings 就绪时）
 lib/policy.js         策略层：零依赖，配置校验/信任围栏/生效配置解析/风格提示词分层/追加提示词/显示思考过程（可独立单测）
-lib/client.js         浏览器半：输入框按钮 + ▾ 统一菜单（撤销 / 思考回看 / 追加提示词 / 预设）+ 撤销栈 + 进度行与思考面板 + 设置页（手写 __ModuleLoader__ bundle）
+lib/client.js         浏览器半：输入框按钮 + ▾ 统一菜单（撤销 / 思考回看 / 追加提示词 / 预设）+ 撤销栈 + 进度行与思考面板 + 通用输入角标（P13）+ 设置页（手写 __ModuleLoader__ bundle）
 lib/types/*.d.ts      对外类型
 .perf/                Web 启动耗时基准脚本与测量报告（README.md 有方法与原始数据）
-scripts/check-guards.mjs  约定守卫：把踩过的坑变成可自动检查的规则（23 条）
+scripts/check-guards.mjs  约定守卫：把踩过的坑变成可自动检查的规则（28 条）
 scripts/dsh-packages.mjs  定位 dsh 安装与其中的宿主包（脚本与测试共用）
 scripts/link-dev-deps.mjs 把宿主依赖软链进本仓库（`npm test` 前自动跑；CI 里自动跳过）
 scripts/lint.mjs      找 Biome 并跑 lint（仓库内 / 全局安装都能用）
 test/smoke.mjs        宿主半冒烟测试（70 例）
 test/client.smoke.mjs 浏览器半冒烟测试（78 例：接线、控件收敛、流式回填、进度行与思考面板、统一菜单、撤销栈、设置页紧凑布局）
 test/client.react.mjs 真 React 渲染测试（6 例：真 react/react-dom SSR，含"不得有 React 警告"）
+test/client.universal.mjs 通用输入角标测试（15 例：自带小 DOM 替身，覆盖扫描/定位/遮挡/写回/取消/手改/失败/回退/动态挂摘/卸载）
 test/settings-activation.mjs 真框架集成测试（6 例：真实 cordis + 真实 settings 提供者，含追加提示词、思考透传全链路）
-.github/workflows/ci.yml  CI：lint + 约定守卫 + 四个套件（Windows）
+.github/workflows/ci.yml  CI：lint + 约定守卫 + 五个套件（Windows）
 DESIGN.md             设计依据：座位/接口证据、撤销追加提示词、提示词分层、风险清单
 LICENSE               MIT
 ```
@@ -201,14 +203,27 @@ curl.exe -s -X POST http://127.0.0.1:3080/api/dsh-input-optimizer/check `
    - 用手改一下草稿再点撤销：菜单项变成「↶ 强制还原原文」且**菜单不收起**，再点一次才真的还原；
    - 断网（或让宿主半不可用）后刷新，再成功优化一次：▾ 仍然出现，撤销照样可达
      （这条钉的是"菜单不该依赖 /catalog"）。
-10. **检查**：
+10. **P13（通用输入角标）**：打开任意一个**不是主输入框**的自由文本输入窗口——例如拿
+    「ask_user_question」的自由作答框、消息反馈框，或第三方插件的表单多行框：
+    - 该输入框**右上角**出现一枚 ✦ 角标（20px，`data-dsh-better-input-badge="better-input"`），
+      只读/禁用/隐藏的输入框没有角标；滚动页面或缩放窗口时角标跟着输入框走；
+    - 写点人话、点角标：角标呼吸（生成中再点 = 取消），文本**边生成边替换**；
+      成功角标变绿并多出一枚 ↶，点 ↶ 还原优化前的文本；内容在优化后被动过时，
+      第一次点 ↶ 只提示"再点一次强制还原"；
+    - 手动改一下正在生成的输入框 → 立刻中止 + 提示「内容在优化过程中被修改」；
+    - 有插件的输入框不想被挂角标 → 给那个元素（或任一祖先）加
+      `data-dsh-better-input-skip` 属性即可；非 `textarea` 的控件想接上，
+      加 `data-dsh-better-input-host`；
+    - 主输入框**不会**多出第二枚角标（它是 Lexical contenteditable，不是 `textarea`）。
+11. **检查**：
 
 ```powershell
-npm run verify                    # lint + 约定守卫 + 四个套件（推荐）
-npm test                          # 约定守卫 + 宿主半 + 浏览器半 + 真 React + 真框架集成
+npm run verify                    # lint + 约定守卫 + 五个套件（推荐）
+npm test                          # 约定守卫 + 宿主半 + 浏览器半 + 真 React + 通用角标 + 真框架集成
 node test\smoke.mjs               # 宿主半 70 例：生效配置、信任判定、并发闸门、六路由全链路、SSE 分帧、思考透传、追加提示词（含内置种子）、打开配置文件
 node test\client.smoke.mjs        # 浏览器半 78 例：座位、控件收敛、流式回填、进度行与思考面板、统一菜单、撤销栈、设置页紧凑布局
 node test\client.react.mjs        # 真 React 6 例：真 react/react-dom SSR 渲染（含"不得有 React 警告"）
+node test\client.universal.mjs    # 通用角标 15 例：扫描/定位/遮挡/写回（原生 setter + input 事件）/取消/手改/失败还原/旧宿主回退/动态挂摘/卸载
 node test\settings-activation.mjs # 真框架集成 6 例：真实 cordis + 真实 settings 提供者，钉住注册时机、提示词与思考透传链路
 node .perf\measure-startup.mjs 12 # Web 启动耗时基准（12 轮冷启动；详见 .perf/README.md）
 ```
@@ -247,6 +262,9 @@ node .perf\measure-startup.mjs 12 # Web 启动耗时基准（12 轮冷启动；�
 | 输入机非空闲（提交/裁决中） | 按钮禁用 |
 | 宿主报错 | 直接展示宿主返回的 `message`（如「草稿 9001 字，超过上限 8000 字」）；403 有专门文案；404/405 按「宿主路由未挂载」提示 |
 | 宿主半没挂载 | 客户端提示「宿主路由未挂载（插件宿主半未启用？）」——实测这种情况下 `POST` 拿到的是 **405 空体**（SPA fallback 先拦非 GET/HEAD），不是 404 |
+| 通用角标挂在哪（P13） | 页面上每个够格的 `textarea`（以及带 `data-dsh-better-input-host` 的元素）右上角一枚 ✦；只读/禁用/被 `data-dsh-better-input-skip` 覆盖/本插件自己界面里的不挂。详见「通用输入角标（P13）」 |
+| 通用角标点击 | 读写该输入框（原生 setter + `input` 事件）→ 同一套宿主路由与流式回填 → 成功后多出 ↶ 撤销角标；生成中再点 = 取消 |
+| 通用角标的撤销 | 按元素隔离（弱引用，元素被移除即回收）；文本被动过时第一次点击只武装，与主按钮同语义 |
 
 > **版本适配（真机踩坑记录）**：已安装的 dsh 0.1.2-rc.1 对 `conversation.input.left/right` 调的是
 > `renderSlot(name, {})`，**没有 owner props**——所以本插件一律通过框架注入的 `useInput` 读输入状态，
@@ -374,6 +392,49 @@ P11 补上两件事：
   塞 14px 图标既要对齐、又给每个图标多留一条降级路径，而文字前缀在任何图标集下长得一样。
 - **点击钩子**：菜单项的 `data-dsh-better-input-undo` / `data-dsh-better-input-thinking-toggle`
   沿用旧名字（外部排查脚本与测试都按它们定位），只是位置从工具行移到了菜单里。
+
+## 通用输入角标（P13）
+
+主输入框（composer）之外的输入窗口**不在任何跨插件契约里**：官方与第三方插件各自渲染自己的
+自由文本控件，既没有统一座位，也没有共享的草稿 store——客户端的 bundle 也不能 `import` 别的插件。
+所以 P13 换了一条**唯一共同可用**的契约来覆盖"大部分输入窗口"：它们最终都是页面上的 `<textarea>`。
+
+```
+┌─────────────────────────────────────────┐
+│ 这个插件窗口里的多行输入框…          ✦ │ ← 角标：点一次 = 优化这段文本
+│                                         │   （生成中 = 取消；成功变绿）
+└─────────────────────────────────────────┘
+   ↶  ← 成功后多出的撤销角标
+```
+
+| 项 | 规则 |
+|---|---|
+| 挂给谁 | 页面上的 `textarea`（DSH 里"人话输入"的标准控件）；另外**任何带 `data-dsh-better-input-host` 的元素**都算输入窗口（非 textarea 的第三方控件可自己报名） |
+| 不挂给谁 | 只读 / 已禁用 / 尺寸太小（< 80×28）或不在视口内（角标存在但不显示）/ 带 `data-dsh-better-input-skip` 的元素或其子孙 / 本插件自己的界面（设置页与主按钮工具行） |
+| 角标位置 | 宿主右上角（视口坐标），滚动、缩放、DOM 变化后重排；**被对话框/抽屉盖住时隐藏**（用 `elementFromPoint` 判宿主中心点的命中元素，取不到就当可见）；页面最多 40 个宿主（第三方页面可能有几十个 textarea） |
+| 点击 | 读宿主的当前文本 → 走**与主按钮相同的宿主路由**（`/optimize/stream`，旧宿主自动回退 `/optimize`）→ 边生成边写回；生成中再点 = 取消 |
+| 写回 | **平台原生 value setter + 冒泡 `input` 事件**。第三方输入窗口几乎都是 React 受控组件，直接赋值会被 value tracker 忽略，组件 state 停在旧文本、下一次渲染把结果覆盖回去（表现为"点了没反应"） |
+| 撤销 | 成功后宿主旁出现 ↶（按元素隔离，弱引用）；文本在优化后被动过时第一次点击只"武装"（换成「再点一次强制还原」），与主按钮同语义 |
+| 失败 / 手改 | 与主按钮同文案：空输入 / 超长（本地拦下，不发请求）、流中途失败**还原原文**、用户手改立刻中止并提示「草稿在优化过程中被修改」 |
+| 逃生口 | `data-dsh-better-input-skip`（一行 HTML 关掉某个输入框；给"挂了反而碍事"的插件用）、`data-dsh-better-input-host`（接入非 textarea 控件） |
+| 会话键 | 通用角标没有会话上下文，按元素给一个稳定合成 id（`data-dsh-better-input-session` 可显式指定）：**同一输入窗口单航班，全局并发上限照旧**（宿主的 `maxConcurrentCalls`） |
+
+**为什么不做成"每个插件各自集成"**：那要求每个输入窗口的作者改自己的代码——正是"下载很多插件"这个
+前提最不可能发生的事。DOM 层方案不依赖任何插件配合，代价是**没有类型契约**：所以给了跳过标记与
+显式报名两个开关，并把"受控组件写回"这条最容易踩的坑固化成一个约定守卫。
+
+**边界（v1 明确不做）**：`contenteditable`（Lexical 那类编辑器，含主输入框）不挂角标——整体替换
+富文本节点的风险远高于收益；只优化选中片段、把通用角标的优化历史并入会话撤销栈也都不在范围内。
+
+另外两处**已知覆盖不到**，以及一处**会滞后**（写在这里，免得被读成"全都能覆盖"）：
+- **Shadow DOM / iframe** 里的输入窗口：`document.querySelectorAll` 不穿透它们，所以扫不到；
+- **不动尺寸的布局动画**：位置重算靠 `MutationObserver` + 滚动/缩放事件，没有挂 `ResizeObserver`——
+  宿主在"没有 DOM 变化、也没有滚动/缩放"的情况下自己改变尺寸时，角标会滞后到下一次事件；
+- 顺带一个规模上限：一个页面最多挂 40 个角标（超出部分等前面的消失后由下一次扫描补上）。
+
+**为什么不复用主按钮的组件**：主按钮的进度行 / 思考面板 / 菜单都是 React 座位组件（依赖
+`useInput` 与 `setDraft`），而通用角标拿不到任何 React 树位置，也不该往别人的组件树里塞节点。
+两者共用的是**更该共用的那一层**：路由调用、流式分帧、CAS 与撤销语义、词典文案。
 
 ## 优化风格与追加提示词的合并（P6.1/P6.2 → P8/P9）
 
@@ -670,7 +731,7 @@ body: 无
 ## 工程化
 
 ```powershell
-npm run verify     # 一条命令跑完全部检查：lint → 约定守卫 → 四个套件
+npm run verify     # 一条命令跑完全部检查：lint → 约定守卫 → 五个套件
 npm run lint       # Biome lint（只 lint，不 format，理由见下）
 npm run guards     # 约定守卫：把踩过的坑变成可自动检查的规则
 npm test           # 约定守卫 + 宿主半 + 浏览器半 + 真 React + 真框架集成
@@ -690,7 +751,7 @@ npm run link-deps  # 手动补 dev 依赖链接（pretest 会自动跑）
 **为什么只 lint 不 format**：既有代码的排版是刻意的（CSS 片段逐条成行、测试里成组的紧凑断言、JSDoc 分组），
 批量重排会产生上千行纯格式 diff，让 review 失去信号。需要时可对单个文件跑 `npm run format`。
 
-**CI**（`.github/workflows/ci.yml`）：Windows 上跑 lint + 约定守卫 + 四个套件，宿主依赖从 registry 装
+**CI**（`.github/workflows/ci.yml`）：Windows 上跑 lint + 约定守卫 + 五个套件，宿主依赖从 registry 装
 （CI 里没有 dsh 安装，`link-dev-deps` 会检测到"依赖已可从仓库解析"而安静跳过）。
 装完还会 `npm ls --depth=0` 再校验一次：npm 11 在某些 flag 下会**静默跳过**已在 `package.json` 里
 声明为 peer 的那几个包（退出码仍是 0），这道校验专门把这种"假绿"变成红灯——2026-09-10 CI 首跑
