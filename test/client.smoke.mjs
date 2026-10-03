@@ -204,9 +204,9 @@ const requireShim = (primitives) => (spec) => {
 /* ── 假 ctx：捕获词典与座位注册 ───────────────────────────────────────── */
 
 /**
- * 造一个假设置作用域（对齐 ctx.settingsScope.bind 的契约）。
+ * 造一个假设置表单（对齐 ctx.configForms.get 的契约）。
  * @param {object} options - 替身参数。
- * @returns {object} 假 scope。
+ * @returns {object} 假 form。
  */
 function makeFakeScope(options = {}) {
   const mutations = []
@@ -287,8 +287,8 @@ function fakeCtx(options = {}) {
           inject: (_key, callback) => callback(),
           register: (registerOptions, component) => { seat.push({ key: registerOptions.name, options: registerOptions, component }) },
         },
-        settingsScope: {
-          bind(spec) {
+        configForms: {
+          get(spec) {
             binds.push(spec)
             return scope
           },
@@ -920,7 +920,7 @@ await test('bundle id 必须等于包名，factory 返回 apply/inject', () => {
   assert.equal(entry.id, pkg.name, 'bundle id 必须等于包名')
   const exports = entry.factory(requireShim({}))
   assert.equal(typeof exports.apply, 'function')
-  assert.deepEqual([...exports.inject], ['slots', 'locale', 'settingsScope'])
+  assert.deepEqual([...exports.inject], ['slots', 'locale', 'configForms'])
 })
 await test('apply 注册词典、注入样式、把条目注册进模型左侧座位', () => {
   const { ctx, seat, dictionaries } = fakeCtx()
@@ -1899,7 +1899,8 @@ await test('流中途失败：已写入的草稿还原，但思考内容仍可�
 console.log('client half: 设置页')
 await test('注册进 settings.section，并按命名空间绑定设置作用域', () => {
   const harness = mount({})
-  assert.deepEqual(harness.binds, [{ namespace: SETTINGS_NAMESPACE }])
+  // dsh 0.2.0+：configForms.get(entryId) 收字符串 entry id（= profile 里的 `id: better-input`）。
+  assert.deepEqual(harness.binds, [SETTINGS_NAMESPACE])
   assert.equal(harness.section.options.id, 'better-input')
   assert.equal(typeof harness.section.options.order, 'number')
   assert.equal(harness.section.options.label(), 'settings.nav', 'label 必须是可解析的 thunk')
@@ -1993,12 +1994,12 @@ await test('已保存的配置会被回填（刷新页面后仍然显示）', ()
   const page = mountSettings({
     settingsValue: {
       customPromptEnabled: true,
-      systemPrompt: '我的提示词',
+      userSystemPrompt: '我的提示词',
       modelProvider: 'acme',
       modelId: 'm1',
-      temperature: 0.4,
-      maxOutputTokens: 2048,
-      timeoutMs: 15000,
+      userTemperature: 0.4,
+      userMaxOutputTokens: 2048,
+      userTimeoutMs: 15000,
     },
   })
   const view = page.open('prompt', 'model', 'params')
@@ -2024,8 +2025,8 @@ await test('改动后保存：只发变化的字段，带 revision，原子提�
   assert.equal(revision, 7, '必须带读到的 revision（版本栅栏）')
   assert.deepEqual(ops, [
     { op: 'set', path: ['customPromptEnabled'], value: true },
-    { op: 'set', path: ['systemPrompt'], value: '新提示词' },
-    { op: 'set', path: ['temperature'], value: 0.2 },
+    { op: 'set', path: ['userSystemPrompt'], value: '新提示词' },
+    { op: 'set', path: ['userTemperature'], value: 0.2 },
   ])
   assert.equal(page.view().noteText, 'settings.saved')
   assert.equal(page.view().noteTone, 'ok')
@@ -2151,7 +2152,7 @@ await test('思考强度建议清单：以宿主下发为准，宿主没到用�
     [...REASONING_EFFORT_SUGGESTIONS],
   )
 })
-await test('没有改动时保存不发请求，只提示', async () => {  const page = mountSettings({ settingsValue: { systemPrompt: '不变的' } })
+await test('没有改动时保存不发请求，只提示', async () => {  const page = mountSettings({ settingsValue: { userSystemPrompt: '不变的' } })
   await page.view().action('save').props.onClick()
   assert.equal(page.scope.mutations.length, 0)
   assert.equal(page.view().noteText, 'settings.noChange')
@@ -2207,7 +2208,7 @@ await test('宿主拒绝写入时**不得**假报已保存（mutate 不会 rejec
   // 真实契约：宿主拒绝（revision 冲突 / schema+validate 不过）时 mutate 只是 recover 后返回，
   // 既不抛错也不返回值。旧代码直接 await 就 flash('已保存')，用户以为存上了其实没有。
   const page = mountSettings({
-    settingsValue: { systemPrompt: '旧' },
+    settingsValue: { userSystemPrompt: '旧' },
     mutateRefuse: true,
   })
   const view = page.open('prompt')
@@ -2224,7 +2225,7 @@ await test('宿主拒绝写入时**不得**假报已保存（mutate 不会 rejec
 })
 await test('宿主拒绝恢复默认时同样不假报成功', async () => {
   const page = mountSettings({
-    settingsValue: { systemPrompt: '旧' },
+    settingsValue: { userSystemPrompt: '旧' },
     mutateRefuse: true,
   })
   await page.view().action('reset').props.onClick()
@@ -2235,7 +2236,7 @@ await test('宿主拒绝恢复默认时同样不假报成功', async () => {
 })
 await test('装配错误（真 reject）时把错误消息带出来', async () => {
   const page = mountSettings({
-    settingsValue: { systemPrompt: '旧' },
+    settingsValue: { userSystemPrompt: '旧' },
     mutateFail: new Error('settings scope is not mounted'),
   })
   const view = page.open('prompt')
@@ -2249,7 +2250,7 @@ await test('恢复默认配置：对所有字段发 unset（含追加提示词�
   const page = mountSettings({
     settingsValue: {
       customPromptEnabled: true,
-      systemPrompt: 'x',
+      userSystemPrompt: 'x',
       modelProvider: 'acme',
       modelId: 'm1',
       promptProfiles: [{ id: 'p1', name: '周报', prompt: '稿' }],
@@ -2264,7 +2265,8 @@ await test('恢复默认配置：对所有字段发 unset（含追加提示词�
   assert.equal(ops.length, 11 + HOST_STYLE_IDS.length)
   assert.equal(ops.every(op => op.op === 'unset'), true)
   assert.deepEqual(ops.map(op => op.path[0]).sort(), [
-    'customPromptEnabled', 'maxOutputTokens', 'modelId', 'modelProvider', 'systemPrompt', 'temperature', 'timeoutMs',
+    'customPromptEnabled', 'userMaxOutputTokens', 'modelId', 'modelProvider', 'userSystemPrompt',
+    'userTemperature', 'userTimeoutMs',
     'showReasoning',
     'defaultReasoningEffort',
     'promptProfiles', 'activeProfileId',
@@ -2592,9 +2594,9 @@ await test('设置页展示配置文件路径（便于手动编辑/复制）', a
 })
 
 await test('远端提交后（未在编辑）表单会同步成新值', async () => {
-  const page = mountSettings({ settingsValue: { systemPrompt: '旧值' } })
+  const page = mountSettings({ settingsValue: { userSystemPrompt: '旧值' } })
   assert.equal(page.open('prompt').inputs.get('systemPrompt').props.value, '旧值')
-  page.scope.publish({ value: { systemPrompt: '远端改了' } })
+  page.scope.publish({ value: { userSystemPrompt: '远端改了' } })
   assert.equal(page.view().inputs.get('systemPrompt').props.value, '远端改了')
 })
 await test('可写性/可用性两态都有明确说明', () => {

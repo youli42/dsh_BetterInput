@@ -25,10 +25,29 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { Context } from '@deepseek-ai/cordis'
-import SettingsFile from '@deepseek-ai/dsh-settings-file'
+import { createRequire } from 'node:module'
 
 import * as plugin from '../lib/index.js'
 import { ROUTE, ROUTE_CATALOG, ROUTE_OPEN_CONFIG, ROUTE_STREAM, SETTINGS_NAMESPACE } from '../lib/policy.js'
+
+const require = createRequire(import.meta.url)
+
+/**
+ * dsh 0.2.0 移除了 `dsh-settings-file`，设置通道改为 Config schema 自动投影 +
+ * `dsh-settings`/`dsh-config-editor`。本套件原钉的"注册时机竞态"缺陷已不存在。
+ * 旧/新提供者都解析不到时按 SKIP 处理（端到端验证见 README 真机步骤）。
+ * @returns {{ module: unknown } | undefined} 可加载时返回提供者模块，否则 undefined。
+ */
+function resolveSettingsProvider() {
+  try {
+    return { module: require('@deepseek-ai/dsh-settings-file') }
+  } catch {
+    return undefined
+  }
+}
+
+const SETTINGS_PROVIDER = resolveSettingsProvider()
+const SettingsFile = SETTINGS_PROVIDER?.module?.default ?? SETTINGS_PROVIDER?.module
 
 /**
  * 临时目录：**优先放仓库内**（`test/.tmp/`，已 gitignore）。
@@ -264,6 +283,10 @@ async function driveStream(routes, body) {
 }
 if (TMP_PARENT === undefined) {
   console.log('SKIP  当前环境既不能写 test/.tmp 也不能写系统临时目录（只读沙箱/受限 CI）——不是回归')
+  process.exit(0)
+}
+if (!SETTINGS_PROVIDER) {
+  console.log('SKIP  当前 dsh 安装里没有 @deepseek-ai/dsh-settings-file：0.2.0+ 用 Config schema 自动投影，不再需要独立的 settings 提供者——这条套件在新版下待重写，不是回归')
   process.exit(0)
 }
 

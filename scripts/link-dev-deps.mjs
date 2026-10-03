@@ -27,16 +27,20 @@ import { resolveDshAnchor, resolvePackageDir } from './dsh-packages.mjs'
 
 /**
  * 跑测试/运行时**必须**能从仓库解析的宿主包：
- *   · dsh-llm / schemastery —— 插件自身的运行时导入；
- *   · cordis / dsh-settings / dsh-settings-file —— 真框架集成测试。
+ *   · dsh-llm / schemastery / cosmokit —— 插件自身的运行时导入
+ *     （cosmokit 用于 `isVolatile`：用户层字段是 volatile 引用，宿主半要解引用）；
+ *   · cordis / dsh-settings —— 真框架集成测试。
+ *
+ * `dsh-settings-file` 在 dsh 0.2.0+ 已移除（设置通道改为 Config schema 自动投影），
+ * 不再链接；老的 `test/settings-activation.mjs` 在缺它时按 SKIP 处理。
  * react / react-dom 单独处理（必须版本配对，见文件末尾）。
  */
 const REQUIRED = [
   '@deepseek-ai/dsh-llm',
   '@deepseek-ai/schemastery',
+  '@deepseek-ai/cosmokit',
   '@deepseek-ai/cordis',
   '@deepseek-ai/dsh-settings',
-  '@deepseek-ai/dsh-settings-file',
 ]
 
 /**

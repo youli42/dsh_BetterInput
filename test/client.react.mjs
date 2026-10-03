@@ -104,7 +104,7 @@ function fakeCtx(scope) {
             seat.push({ key: options.name, options, component })
           },
         },
-        settingsScope: { bind: () => scope },
+        configForms: { get: () => scope },
       })
     },
     locale: { register: () => () => {}, bind: () => key => key },

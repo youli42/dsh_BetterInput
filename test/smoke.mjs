@@ -9,8 +9,11 @@
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
 
+import { isVolatile } from '@deepseek-ai/cosmokit'
+
 import {
   ACTIVE_PROFILE_FIELD,
+  COMPOSITION_FIELD_KEYS,
   DEFAULT_REASONING_EFFORT_FIELD,
   MAX_BODY_BYTES,
   MAX_PROMPT_PROFILES,
@@ -38,6 +41,19 @@ import {
   validateSettingsSection,
 } from '../lib/policy.js'
 import { apply, inject, name } from '../lib/index.js'
+import { Config } from '../lib/settings.js'
+
+/**
+ * 取 volatile 字段的当前值。
+ *
+ * dsh 0.2.0+ 的 Config schema 把用户层字段声明成 volatile，校验后拿到的是**只读引用**
+ * 而不是值（`schema.meta.volatile` → 输出类型 `Volatile<T>`）。宿主半用
+ * `isVolatile(value) ? value.get() : value` 现读（lib/index.js 的 `liveSection`），
+ * 这里用同一手法，好让 schema 用例断言值而不是引用对象。
+ * @param {unknown} value - 校验后的字段值（可能是引用）。
+ * @returns {unknown} 当前值。
+ */
+const plain = value => (isVolatile(value) ? value.get() : value)
 
 let passed = 0
 const failures = []
@@ -357,7 +373,11 @@ async function drivePath(path, request) {
  */
 function setup(config, options = {}) {
   const fake = fakeCtx(options)
-  apply(fake.ctx, config)
+  // dsh 0.2.0+：用户设置字段已并进 Config schema，apply 收到的 config 是 base+user 合并值。
+  // 测试通过 settingsSection 传入"用户层"字段，这里合并进 config 给 apply，模拟 loader 行为
+  // （用户层覆盖组合层同名字段，如 systemPrompt）。
+  const merged = { ...config, ...(options.settingsSection ?? {}) }
+  apply(fake.ctx, merged)
   lastFake = fake
   boundRoute = fake.routes.find(route => route.path === ROUTE)
   return {
@@ -475,11 +495,8 @@ await test('日志必须真的落进 ctx.logger（ctx.get("logger") 恒为 undef
   // printf 风格：ROUTE 是参数而不是拼进格式串（否则消息里的 % 占位符会被吃掉）。
   assert.equal(mounted.format, 'better-input: mounted %s (+stream/catalog/check/open-config)')
   assert.equal(mounted.params[0], ROUTE)
-  // 设置命名空间的注册结论也必须有一条明确日志（否则"设置服务不可用"根本无从排查）。
-  const registered = observations.logs.find(entry => String(entry.format).includes('settings namespace'))
-  assert.ok(registered !== undefined, '注册成功/失败都必须留下日志')
-  assert.equal(registered.level, 'info')
-  assert.equal(registered.params[0], SETTINGS_NAMESPACE)
+  // dsh 0.2.0+ 不再注册独立 settings 命名空间，所以没有 "settings namespace" 日志——
+  // 设置表单由 Config schema 自动投影，无需本插件登记。
 
   // 失败路径也要留下记录，且参数化传参。
   await drive(fakeRequest({ body: JSON.stringify({ text: 'x' }) }))
@@ -937,12 +954,12 @@ await test('优先级：内置默认 ← 组合配置 ← 用户设置', () => {
 
   const fromSettings = effectiveConfig(config, {
     customPromptEnabled: true,
-    systemPrompt: 'SET',
+    userSystemPrompt: 'SET',
     modelProvider: 'set-p',
     modelId: 'set-m',
-    temperature: 0.1,
-    maxOutputTokens: 55,
-    timeoutMs: 9000,
+    userTemperature: 0.1,
+    userMaxOutputTokens: 55,
+    userTimeoutMs: 9000,
   })
   assert.equal(fromSettings.systemPrompt, 'SET')
   assert.deepEqual([fromSettings.provider, fromSettings.model], ['set-p', 'set-m'])
@@ -953,7 +970,7 @@ await test('优先级：内置默认 ← 组合配置 ← 用户设置', () => {
 })
 await test('开关关闭 / 只有一半模型字段时回落到组合配置', () => {
   const config = resolveConfig({ systemPrompt: 'CFG', model: { provider: 'cfg-p', model: 'cfg-m' } })
-  const promptOff = effectiveConfig(config, { customPromptEnabled: false, systemPrompt: '忽略我' })
+  const promptOff = effectiveConfig(config, { customPromptEnabled: false, userSystemPrompt: '忽略我' })
   assert.equal(promptOff.systemPrompt, 'CFG')
   const halfModel = effectiveConfig(config, { modelProvider: 'only-provider' })
   assert.deepEqual([halfModel.provider, halfModel.model], ['cfg-p', 'cfg-m'])
@@ -961,17 +978,17 @@ await test('开关关闭 / 只有一半模型字段时回落到组合配置', ()
 })
 await test('跨字段校验规则矩阵（宿主与客户端共用结论）', () => {
   assert.deepEqual(validateSettingsSection({}), [])
-  assert.deepEqual(validateSettingsSection({ customPromptEnabled: false, systemPrompt: '' }), [])
+  assert.deepEqual(validateSettingsSection({ customPromptEnabled: false, userSystemPrompt: '' }), [])
   assert.equal(validateSettingsSection({ customPromptEnabled: true }).length, 1)
-  assert.equal(validateSettingsSection({ customPromptEnabled: true, systemPrompt: '   ' }).length, 1)
+  assert.equal(validateSettingsSection({ customPromptEnabled: true, userSystemPrompt: '   ' }).length, 1)
   assert.equal(validateSettingsSection({ modelProvider: 'p' }).length, 1)
   assert.equal(validateSettingsSection({ modelId: 'm' }).length, 1)
   assert.deepEqual(validateSettingsSection({ modelProvider: 'p', modelId: 'm' }), [])
-  assert.equal(validateSettingsSection({ temperature: 3 }).length, 1)
-  assert.equal(validateSettingsSection({ temperature: 'hot' }).length, 1)
-  assert.equal(validateSettingsSection({ maxOutputTokens: 0 }).length, 1)
-  assert.equal(validateSettingsSection({ timeoutMs: 10 }).length, 1)
-  assert.equal(validateSettingsSection({ systemPrompt: 5 }).length, 1)
+  assert.equal(validateSettingsSection({ userTemperature: 3 }).length, 1)
+  assert.equal(validateSettingsSection({ userTemperature: 'hot' }).length, 1)
+  assert.equal(validateSettingsSection({ userMaxOutputTokens: 0 }).length, 1)
+  assert.equal(validateSettingsSection({ userTimeoutMs: 10 }).length, 1)
+  assert.equal(validateSettingsSection({ userSystemPrompt: 5 }).length, 1)
 })
 
 console.log('settings: 追加提示词（可切换的追加提示词）')
@@ -1054,7 +1071,7 @@ await test('追加提示词只追加、不替换：systemPrompt 始终是系统�
     promptProfiles: profiles,
     activeProfileId: '',
     customPromptEnabled: true,
-    systemPrompt: '自定义',
+    userSystemPrompt: '自定义',
   })
   assert.equal(inactive.systemPrompt, '自定义')
   assert.equal(inactive.profileId, undefined)
@@ -1120,7 +1137,7 @@ await test('内置风格已是追加提示词的种子：默认文案 = 追加�
   // 内置条目与自定义系统提示词可叠加：基底取自定义，追加接在其后。
   const withCustom = effectiveConfig(config, {
     customPromptEnabled: true,
-    systemPrompt: '我的系统提示词',
+    userSystemPrompt: '我的系统提示词',
     activeProfileId: 'spec',
   })
   const spec = withCustom.profiles.find(profile => profile.id === 'spec')
@@ -1150,64 +1167,19 @@ await test('profileRowsOf：catalog 的清单行只有 id/名称/来源/是否�
   ])
 })
 
-console.log('settings: 命名空间注册')
-await test('注册 better-input 命名空间，applies=live，validate 拒绝非法组合', () => {
-  const { settingsCalls } = setup({})
-  assert.equal(settingsCalls.length, 1)
-  assert.equal(settingsCalls[0].namespace, SETTINGS_NAMESPACE)
-  assert.equal(settingsCalls[0].options.applies, 'live')
-  assert.equal(typeof settingsCalls[0].options.validate, 'function')
-  assert.doesNotThrow(() => settingsCalls[0].options.validate({ customPromptEnabled: false }))
-  assert.throws(
-    () => settingsCalls[0].options.validate({ customPromptEnabled: true, systemPrompt: '' }),
-    /提示词/,
-  )
-})
-await test('部署没挂设置提供者时：不报错、不注册、路由照挂', async () => {
-  const observations = setup({}, { settings: false, chunks: TEXT_CHUNKS, selection: { provider: 'p', model: 'm' } })
-  assert.equal(observations.settingsCalls.length, 0)
+console.log('settings: Config schema 投影（dsh 0.2.0+）')
+await test('apply 不再注册独立 settings 命名空间：路由照挂、catalog 如实可用', async () => {
+  // dsh 0.2.0 移除了 ctx.settings.register：设置字段由 Config schema（lib/settings.js）
+  // 自动投影，用户层写进 profile patch、loader 合并后重新 apply。这里钉"apply 后不再
+  // 有 register 调用、6 条路由照挂、catalog available=true、优化链路正常"。
+  const observations = setup({}, { chunks: TEXT_CHUNKS, selection: { provider: 'p', model: 'm' } })
+  assert.equal(observations.settingsCalls.length, 0, '不再调用 settings.register')
   assert.equal(observations.routes.length, 6)
+  const catalog = await drivePath(ROUTE_CATALOG, fakeRequest({ method: 'GET' }))
+  assert.equal(catalog.json.settings.available, true)
   const result = await drive(fakeRequest({ body: '{"text":"x"}' }))
   assert.equal(result.status, 200)
   assert.equal(result.json.text, '改写后的提示词。')
-  // 目录路由必须如实汇报"不可用"。
-  const catalog = await drivePath(ROUTE_CATALOG, fakeRequest({ method: 'GET' }))
-  assert.equal(catalog.json.settings.available, false)
-})
-await test('settings 服务晚到：注册必须补上（本轮真机事故的单元级回归）', async () => {
-  // 真实链路：插件只 inject webServer/llm，可能先于设置提供者激活；而 SettingsProvider 的
-  // [Service.init] 要 await 读盘，`ctx.get('settings')` 在它 ACTIVE 前恒为 undefined。
-  // 旧代码在 apply 里读一次 → 永久降级（真机表现就是"设置服务不可用，重启也没用"）。
-  const observations = setup({}, { settings: false, chunks: TEXT_CHUNKS, selection: { provider: 'p', model: 'm' } })
-  assert.equal(observations.settingsCalls.length, 0, '此刻服务还没到')
-
-  assert.equal(observations.deliverSettings(), 1, '服务就绪时必须唤醒注册回调')
-  assert.equal(observations.settingsCalls.length, 1, '命名空间必须被注册')
-  assert.equal(observations.settingsCalls[0].namespace, SETTINGS_NAMESPACE)
-
-  const catalog = await drivePath(ROUTE_CATALOG, fakeRequest({ method: 'GET' }))
-  assert.equal(catalog.json.settings.available, true, '注册后目录路由必须变为可用')
-  assert.equal(catalog.json.settings.reason, undefined)
-})
-await test('注册失败时把宿主侧原因带给客户端，而不是只显示笼统的不可用', async () => {
-  // 用一个"注册即抛"的设置服务模拟非法存量段/命名空间冲突这类宿主侧拒绝。
-  const observations = setup({}, { settings: 'reject', chunks: TEXT_CHUNKS, selection: { provider: 'p', model: 'm' } })
-  assert.equal(observations.settingsCalls.length, 1, '确实尝试过注册')
-  const catalog = await drivePath(ROUTE_CATALOG, fakeRequest({ method: 'GET' }))
-  assert.equal(catalog.json.settings.available, false)
-  assert.equal(catalog.json.settings.reason, 'settings: namespace conflict')
-  const warn = observations.logs.find(entry => entry.level === 'warn')
-  assert.ok(warn !== undefined, '注册失败必须留日志')
-})
-await test('settings 服务消失后回到降级态（注册是子 fiber 上的 effect）', async () => {
-  const observations = setup({}, { chunks: TEXT_CHUNKS, selection: { provider: 'p', model: 'm' } })
-  assert.equal((await drivePath(ROUTE_CATALOG, fakeRequest({ method: 'GET' }))).json.settings.available, true)
-  assert.equal(observations.disposeSettingsChild(), 1, '服务卸载时要执行清理')
-  const after = await drivePath(ROUTE_CATALOG, fakeRequest({ method: 'GET' }))
-  assert.equal(after.json.settings.available, false, '服务没了就必须如实降级')
-  // 降级后优化链路不受影响（回落到组合配置 + 宿主默认模型）。
-  const optimized = await drive(fakeRequest({ body: '{"text":"x"}' }))
-  assert.equal(optimized.status, 200)
 })
 
 console.log('settings: 设置项驱动实际请求')
@@ -1259,29 +1231,48 @@ await test('保存后的模型/提示词/参数就是后续请求用的那套', 
   assert.equal(call.temperature, 0.25)
   assert.equal(call.maxTokens, 321)
 })
-await test('设置是每次请求现读：改完立刻生效，无需重启', async () => {
-  // 设置里没写模型 → 用宿主的默认选择（这一步本身也是「未配置模型时不报错」的体现）。
+await test('设置是每次请求现读：volatile 引用改了值，下一次请求就用新值（不重新 apply）', async () => {
+  // dsh 0.2.0+ 的真机制：用户层字段是 `.volatile()` 引用，volatile 的语义是
+  // "editable **without remounting**"——设置页保存**不会**重新 apply，所以宿主半必须每次
+  // 请求 `.get()` 现读（lib/index.js 的 liveSection）。这里用一个可变引用模拟用户保存：
+  // 同一个已 apply 的实例、只改引用的值，第二次请求就该用新值。
+  // 若有人把值在 apply 时缓存下来，第二次仍会看到旧值，本用例立刻失败。
+  const holder = { prompt: '第一版', enabled: true }
+  const refOf = get => ({
+    [Symbol.for('cosmokit.volatile.write')]: () => {},
+    get: () => get(holder),
+  })
   const observations = setup({}, {
     chunks: TEXT_CHUNKS,
     selection: { provider: 'agent-p', model: 'agent-m' },
-    settingsSection: { customPromptEnabled: true, systemPrompt: '第一版' },
+    settingsSection: {
+      customPromptEnabled: refOf(held => held.enabled),
+      userSystemPrompt: refOf(held => held.prompt),
+    },
   })
   await drive(fakeRequest({ body: '{"text":"x"}' }))
   assert.equal(observations.calls[0].system, '第一版')
-  assert.equal(observations.calls[0].provider, 'agent-p')
-  observations.settingsState.section = { customPromptEnabled: true, systemPrompt: '第二版' }
+
+  // 模拟用户在设置页保存新值（框架就地更新引用，不重新 apply）。
+  holder.prompt = '第二版'
   await drive(fakeRequest({ body: '{"text":"x"}' }))
-  assert.equal(observations.calls[1].system, '第二版')
+  assert.equal(observations.calls[1].system, '第二版', '引用必须每次请求现读')
+  assert.equal(observations.calls[0].system, '第一版', '历史调用不该被回改')
+
+  // 关掉开关同样立刻生效：回落到组合层/内置基底。
+  holder.enabled = false
+  await drive(fakeRequest({ body: '{"text":"x"}' }))
+  assert.notEqual(observations.calls[2].system, '第二版')
 })
 
 console.log('settings: 目录与试调路由')
 await test('catalog：provider 目录 + 当前生效配置 + 来源标注', async () => {
-  setup({}, { settingsSection: { customPromptEnabled: true, systemPrompt: '自定义', modelProvider: 'set-p', modelId: 'set-m' } })
+  setup({}, { settingsSection: { customPromptEnabled: true, userSystemPrompt: '自定义', modelProvider: 'set-p', modelId: 'set-m' } })
   const result = await drivePath(ROUTE_CATALOG, fakeRequest({ method: 'GET' }))
   assert.equal(result.status, 200)
   assert.equal(result.json.namespace, SETTINGS_NAMESPACE)
   assert.equal(result.json.settings.available, true)
-  assert.equal(result.json.settings.section.systemPrompt, '自定义')
+  assert.equal(result.json.settings.section.userSystemPrompt, '自定义')
   assert.deepEqual(result.json.providers, [
     { id: 'deepseek-official', name: 'DeepSeek' },
     { id: 'acme', name: 'Acme' },
@@ -1353,10 +1344,19 @@ await test('启用的追加提示词接在系统提示词之后（追加，不�
     '启用中的追加提示词必须接在系统提示词之后',
   )
 
-  // 切为不追加（activeProfileId 置空）：下一次请求只剩系统提示词链（这里是设置页自定义提示词）。
-  observations.settingsState.section = { ...observations.settingsState.section, activeProfileId: '' }
+  // 切为不追加（activeProfileId 置空）：dsh 0.2.0+ 下 loader 重载 → 新 merged config 重新 apply。
+  setup({}, {
+    chunks: TEXT_CHUNKS,
+    selection: { provider: 'agent-p', model: 'agent-m' },
+    settingsSection: {
+      customPromptEnabled: true,
+      systemPrompt: '自定义提示词',
+      promptProfiles: [{ id: 'weekly', name: '周报模式', prompt: '周报追加提示词的正文' }],
+      activeProfileId: '',
+    },
+  })
   await drive(fakeRequest({ body: '{"text":"x"}' }))
-  assert.equal(observations.calls[1].system, '自定义提示词')
+  assert.equal(lastFake.calls[0].system, '自定义提示词')
 })
 await test('启用内置追加提示词（精简）= 默认链 + 追加要求；老客户端 styleIds 兼容路径不受影响', async () => {
   const observations = setup({ systemPrompt: 'BASE' }, {
@@ -1372,24 +1372,28 @@ await test('启用内置追加提示词（精简）= 默认链 + 追加要求；
   )
 
   // 旧客户端（发 styleIds）在没启用任何追加提示词时：追加路径原样保留，两条互不打扰。
-  observations.settingsState.section = {}
+  // dsh 0.2.0+：loader 重载 → 新 merged config（无 activeProfileId）重新 apply。
+  setup({ systemPrompt: 'BASE' }, {
+    chunks: TEXT_CHUNKS,
+    selection: { provider: 'agent-p', model: 'agent-m' },
+    settingsSection: {},
+  })
   await drive(fakeRequest({ body: JSON.stringify({ text: 'x', styleIds: ['concise'] }) }))
   assert.equal(
-    observations.calls[1].system,
+    lastFake.calls[0].system,
     'BASE\n\n本次额外要求（精简）：在保留全部约束的前提下压缩篇幅，去掉客套与重复表述。',
   )
 })
-await test('settings 命名空间的 schema 认识追加提示词字段（数组形状由 schema 把关）', () => {
-  const { settingsCalls } = setup({})
-  const schema = settingsCalls[0].schema
-  const resolved = schema({
+await test('Config schema 认识追加提示词字段（数组形状由 schema 把关）', () => {
+  // dsh 0.2.0+：schema 是插件 Config（lib/settings.js），不再经 settings.register 注册。
+  const resolved = Config({
     promptProfiles: [{ id: 'a', name: 'A', prompt: 'P' }],
     activeProfileId: 'a',
   })
-  assert.deepEqual(resolved.promptProfiles, [{ id: 'a', name: 'A', prompt: 'P' }])
-  assert.equal(resolved.activeProfileId, 'a')
-  assert.throws(() => schema({ promptProfiles: 'nope' }), undefined, '非数组必须被 schema 拒绝')
-  assert.throws(() => schema({ promptProfiles: [42] }), undefined, '非对象条目必须被 schema 拒绝')
+  assert.deepEqual(plain(resolved.promptProfiles), [{ id: 'a', name: 'A', prompt: 'P' }])
+  assert.equal(plain(resolved.activeProfileId), 'a')
+  assert.throws(() => Config({ promptProfiles: 'nope' }), undefined, '非数组必须被 schema 拒绝')
+  assert.throws(() => Config({ promptProfiles: [42] }), undefined, '非对象条目必须被 schema 拒绝')
   // 字段名走常量：schema、校验、重置清单与客户端镜像共享同一份，不会各说各话。
   assert.equal(SETTINGS_FIELD_KEYS.includes(PROMPT_PROFILES_FIELD), true)
   assert.equal(SETTINGS_FIELD_KEYS.includes(ACTIVE_PROFILE_FIELD), true)
@@ -1646,13 +1650,45 @@ await test('思考强度校验：只接受文本（空串 = 未设置），不�
   assert.equal(validateSettingsSection({ defaultReasoningEffort: null }).length, 0, 'null 视为未设置')
 })
 
-await test('settings schema 认识思考强度字段（归在调用参数里）', () => {
-  const { settingsCalls } = setup({})
-  const schema = settingsCalls[0].schema
-  const resolved = schema({ defaultReasoningEffort: 'low' })
-  assert.equal(resolved.defaultReasoningEffort, 'low')
-  assert.throws(() => schema({ defaultReasoningEffort: 5 }), undefined, '非文本必须被 schema 拒绝')
+await test('Config schema 认识思考强度字段（归在调用参数里）', () => {
+  // dsh 0.2.0+：schema 是插件 Config（lib/settings.js），不再经 settings.register 注册。
+  const resolved = Config({ defaultReasoningEffort: 'low' })
+  assert.equal(plain(resolved.defaultReasoningEffort), 'low')
+  assert.throws(() => Config({ defaultReasoningEffort: 5 }), undefined, '非文本必须被 schema 拒绝')
   assert.equal(SETTINGS_FIELD_KEYS.includes(DEFAULT_REASONING_EFFORT_FIELD), true)
+})
+
+await test('Config schema：用户层字段全部标 .volatile()，组合层字段一律没标', () => {
+  // 这是本轮真机缺陷的回归防线。dsh-settings 只服务 volatile 字段：
+  //   · describe() 对 `volatileForm(schema) === undefined` 的条目**直接跳过**——表单根本不下发，
+  //     客户端的 `configForms.get('better-input')` 永远到不了 ready；
+  //   · write() 还会抛 `Plugin entry "better-input" has no volatile fields`，
+  //     并对任何不落在 volatile 节点下的写入路径抛 `Config field "…" is not volatile`。
+  // 缺一个标记就整条设置页不可用，所以这里逐个字段对拍。
+  for (const key of SETTINGS_FIELD_KEYS) {
+    const field = Config.dict?.[key]
+    assert.ok(field !== undefined, `Config schema 缺少用户层字段 "${key}"`)
+    assert.equal(
+      field.meta?.volatile,
+      true,
+      `用户层字段 "${key}" 必须标 .volatile()，否则设置页不下发、写入会被宿主拒绝`,
+    )
+  }
+  for (const key of COMPOSITION_FIELD_KEYS) {
+    const field = Config.dict?.[key]
+    assert.ok(field !== undefined, `Config schema 缺少组合层字段 "${key}"`)
+    assert.notEqual(
+      field.meta?.volatile,
+      true,
+      `组合层字段 "${key}" 不该标 .volatile()：那等于把它开放给设置页改写`,
+    )
+  }
+  // 两类合起来必须**正好**是 schema 的全部字段：新增字段时漏归类会在这里失败。
+  assert.deepEqual(
+    Object.keys(Config.dict ?? {}).sort(),
+    [...SETTINGS_FIELD_KEYS, ...COMPOSITION_FIELD_KEYS].sort(),
+    'schema 字段与「用户层/组合层」清单必须一一对应',
+  )
 })
 
 /** 一个会公布思考强度的模型（适配器契约里的 `reasoning.efforts`）。 */

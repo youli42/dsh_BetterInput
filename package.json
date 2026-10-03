@@ -18,7 +18,7 @@
   },
   "dsh": {
     "engines": {
-      "dsh": ">=0.1.2-rc.1"
+      "dsh": ">=0.2.0-rc.2"
     },
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -54,10 +54,14 @@
   },
   "peerDependencies": {
     "react": "^18.2.0",
+    "@deepseek-ai/cosmokit": "~1.8.5",
     "@deepseek-ai/dsh-llm": ">=0.1.2-rc.1",
     "@deepseek-ai/schemastery": ">=3"
   },
   "peerDependenciesMeta": {
+    "@deepseek-ai/cosmokit": {
+      "optional": true
+    },
     "@deepseek-ai/dsh-llm": {
       "optional": true
     },

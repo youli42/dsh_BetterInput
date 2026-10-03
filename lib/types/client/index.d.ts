@@ -82,7 +82,7 @@ export interface BetterInputBehavior {
 }
 
 /** 需要就绪的客户端服务。 */
-export declare const inject: readonly ['slots', 'locale', 'settingsScope']
+export declare const inject: readonly ['slots', 'locale', 'configForms']
 
 /* ── 通用输入角标（P13）：主输入框之外的每个输入窗口 ─────────────────────── */
 
@@ -163,24 +163,38 @@ export declare const SETTINGS_SECTION_ID = 'better-input'
  * `props.settings` / `props.t` / `props.catalog`。
  */
 export interface BetterInputSettingsInjected {
-  /** 绑定到 `better-input` 命名空间的设置作用域（读快照、订阅、mutate）。 */
+  /**
+   * 绑定到 `better-input` entry 的设置表单（dsh 0.2.0+ `ctx.configForms.get(entryId)`）。
+   * 快照的 `value` 是**合并后**的值、`base` 是组合层、`user` 是裸用户层。
+   *
+   * 用户层字段用 `user*` **独立存储键**（见客户端 `STORAGE_KEYS`）：`systemPrompt` /
+   * `temperature` / `maxOutputTokens` / `timeoutMs` 与组合层同名，若共用键就无法区分来源。
+   * 这几个键只有用户层会写，所以读取用户值时 `value` 与 `user` 等价。
+   */
   settings: {
     getSnapshot: () => {
       status: 'loading' | 'ready' | 'unavailable'
       value: Partial<Record<string, unknown>> | undefined
+      /** 组合层（patch config）的参考值；用于设置页标注"来自配置文件"。 */
+      base?: unknown
+      /** 裸用户层；某字段在此出现（即使等于默认值）即表示用户已覆盖。 */
+      user?: unknown
       revision: number | undefined
       writable: boolean
       mode: 'host' | 'memory'
     }
     subscribe: (listener: () => void) => () => void
     /**
-     * path ops 原子提交。
+     * path ops 原子提交（dsh 0.2.0+ 返回 boolean：宿主是否接受）。
      *
-     * **注意**：宿主拒绝（revision 冲突 / schema+validate 不过）时**不会 reject**——
-     * 真实实现只 `recover()` 后正常返回，只有装配错误才抛。所以调用方必须自己核对
-     * 镜像里的值是否真的变了（设置页用 `opsApplied()` 做这件事），否则会假报"已保存"。
+     * 注意：宿主拒绝（revision 冲突 / schema+validate 不过）时返回 `false` 而非 reject；
+     * 只有传输/装配错误才 reject。调用方仍应自己核对镜像里的值是否真的变了
+     * （设置页用 `opsApplied()` 做这件事），双保险。
+     *
+     * **写入路径必须落在 volatile 字段下**：宿主对非 volatile 路径直接抛错，
+     * 所以这里只允许发用户层存储键（`customPromptEnabled` / `userSystemPrompt` / …）。
      */
-    mutate: (ops: ReadonlyArray<{ op: 'set' | 'unset', path: string[], value?: unknown }>, expectedRevision?: number) => Promise<void>
+    mutate: (ops: ReadonlyArray<{ op: 'set' | 'unset', path: string[], value?: unknown }>, expectedRevision?: number) => Promise<boolean>
   }
   /** 本插件词典绑定。 */
   t: (key: string) => string

@@ -49,11 +49,18 @@ const checks = [
     must: /ctx\.logger/,
   },
   {
-    why: '设置命名空间注册必须是 ctx.inject(["settings"], …)：ctx.get 是 strict，对"已 provide '
-      + '但未 ACTIVE"的服务返回 undefined，一次性读输掉竞态就永久降级（设置页恒显示不可用）',
-    file: 'lib/settings.js',
-    forbid: /ctx\.get\??\.\(\s*'settings'\s*\)/,
-    must: /ctx\.inject\(\s*\[\s*'settings'\s*\]/,
+    why: 'dsh 0.2.0 移除了客户端 settingsScope 服务：inject 里出现它会永远 pending → '
+      + 'web boot 报 "1 entry did not activate"（2026-10 事故）。新版用 configForms。',
+    file: 'lib/client.js',
+    forbid: /settingsScope/,
+    codeOnly: true,
+  },
+  {
+    why: 'dsh 0.2.0 移除了 ctx.settings.register：宿主半再调用它（或 import bindSettings）'
+      + '会抛 not-a-function 并被吞掉降级——设置页恒显示不可用。设置字段改由 Config schema 投影。',
+    file: 'lib/index.js',
+    forbid: /ctx\.settings\.register|bindSettings/,
+    codeOnly: true,
   },
   {
     why: '样式表必须自带 data-plugin/data-plugin-css：框架在物化期认领未打标的 <style>，'
@@ -231,7 +238,10 @@ const wiredSuites = (() => {
 const failures = []
 
 for (const check of checks) {
-  const source = read(check.file)
+  // 默认用原文检查（保留字符串字面量，must 规则常依赖它）；
+  // 标了 codeOnly:true 的规则改用代码骨架——给"禁止单纯服务名出现在代码里"这类
+  // forbid 用，避免注释里提到历史写法时误报（字符串字面量形式的违规由测试断言兜底）。
+  const source = check.codeOnly === true ? codeOnly(read(check.file)) : read(check.file)
   if (check.forbid?.test(source) === true) {
     failures.push(`${check.file} 出现了被禁止的写法（${String(check.forbid)}）：${check.why}`)
   }

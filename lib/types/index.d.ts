@@ -9,7 +9,7 @@
 /** 稳定 cordis 插件名。 */
 export declare const name = 'better-input'
 
-/** 需要就绪的服务（设置是可选依赖：宿主半用 `ctx.inject(['settings'], …)` 等它就绪，缺了只降级不报错）。 */
+/** 需要就绪的服务（设置通道由框架按 Config schema 自动投影，无需本插件 inject `settings`）。 */
 export declare const inject: readonly ['webServer', 'llm']
 
 /** 能力路由：优化输入内容。 */
@@ -45,7 +45,7 @@ export interface PromptProfile {
   prompt: string
 }
 
-/** 用户设置命名空间：宿主注册、客户端 `settingsScope` 绑定同一个。 */
+/** 用户设置命名空间（= profile entry id；dsh 0.2.0+ 客户端 `configForms.get` 与宿主 `configEditor` 用同一个）。 */
 export declare const SETTINGS_NAMESPACE = 'better-input'
 
 /** 设置段里"追加提示词列表"的字段名。 */
@@ -66,22 +66,47 @@ export declare const REASONING_EFFORT_SUGGESTIONS: readonly ['minimal', 'low', '
 /** 追加提示词数量上限。 */
 export declare const MAX_PROMPT_PROFILES = 20
 
-/** 设置段的扁平字段（与宿主 schema、客户端表单一一对应）。 */
+/**
+ * 与组合层同名重叠的字段，其**用户层存储键**改用独立名字（表单字段名 → 存储键）。
+ * 分开的理由见 `Config`；客户端 `lib/client.js` 的 `STORAGE_KEYS` 是同一份映射的镜像。
+ */
+export declare const USER_FIELD_KEYS: Readonly<{
+  systemPrompt: 'userSystemPrompt'
+  temperature: 'userTemperature'
+  maxOutputTokens: 'userMaxOutputTokens'
+  timeoutMs: 'userTimeoutMs'
+}>
+
+/** 组合层（组合的 `config:`）字段清单；设置页不可改，故 schema 里**不**标 volatile。 */
+export declare const COMPOSITION_FIELD_KEYS: readonly [
+  'enabled', 'systemPrompt', 'model', 'presets', 'maxInputChars',
+  'maxOutputTokens', 'timeoutMs', 'temperature', 'maxConcurrentCalls',
+]
+
+/** 用户层存储键清单 = 设置页可写的字段；每个都必须在 schema 里标 `.volatile()`。 */
+export declare const SETTINGS_FIELD_KEYS: readonly string[]
+
+/**
+ * 用户层（设置页写入）的扁平字段 = **存储键**（与宿主 `Config` 的 volatile 字段一一对应）。
+ *
+ * 与组合层同名的那四个字段在这里是 `user*` 独立键；表单字段名（`systemPrompt` 等）
+ * 只存在于客户端界面，映射见 `lib/client.js` 的 `STORAGE_KEYS`。
+ */
 export interface BetterInputSettingsSection {
-  /** 是否启用自定义系统提示词（默认 false = 用内置/组合配置的系统提示词）。 */
+  /** 是否启用自定义系统提示词（默认 false = 用组合层/内置的系统提示词）。 */
   customPromptEnabled?: boolean
   /** 自定义 system prompt 正文（基底；追加提示词接在它之后）。 */
-  systemPrompt?: string
+  userSystemPrompt?: string
   /** 模型 provider id（与 modelId 成对）。 */
   modelProvider?: string
   /** 模型 id（与 modelProvider 成对）。 */
   modelId?: string
-  /** 采样温度。 */
-  temperature?: number
-  /** 输出 token 上限。 */
-  maxOutputTokens?: number
-  /** 单次调用超时（毫秒）。 */
-  timeoutMs?: number
+  /** 采样温度覆盖（与组合层 `temperature` 分键）。 */
+  userTemperature?: number
+  /** 输出 token 上限覆盖（与组合层 `maxOutputTokens` 分键）。 */
+  userMaxOutputTokens?: number
+  /** 单次调用超时覆盖（与组合层 `timeoutMs` 分键）。 */
+  userTimeoutMs?: number
   /**
    * 是否把模型的**思考过程**透传给浏览器（P11）。未设置 = 默认开；只有显式的 `false` 才关，
    * 关掉时宿主根本不发 `reasoning` 事件（思考正文不出宿主）。
@@ -103,13 +128,23 @@ export interface BetterInputSettingsSection {
   stylePromptSpec?: string
 }
 
-/** 插件配置（全部可选；优先级低于设置页里的用户设置）。 */
+/**
+ * 插件 Config（组合层 base + 用户层 user 共用一份 schema）。
+ *
+ * **两层的键不重叠**：组合层字段（`systemPrompt`/`temperature`/`maxOutputTokens`/`timeoutMs` 等）
+ * 由部署方写在组合的 `config:` 里；用户层用 `user*` 独立键（设置页写入）。同名会让宿主拿到一个
+ * 合并值、再也分不清来源，`/catalog` 的 `sources.*` 就会把用户自己的输入报成「来自配置文件」。
+ *
+ * 用户层字段在 schema 里标了 `.volatile()`：设置表单只服务 volatile 字段，且框架交给 `apply`
+ * 的是**只读引用**（保存不重新 apply，宿主每次请求现读）。
+ */
 export interface Config {
+  // ── 组合层（组合的 `config:`；设置页不可改） ──
   /** 总开关；false 时不挂路由。 @default true */
   enabled?: boolean
-  /** 默认系统提示词（组合层基底；追加提示词接在它之后）。 */
+  /** 默认系统提示词（基底；追加提示词接在它之后，不替换它）。 */
   systemPrompt?: string
-  /** 固定模型路由；provider 与 model 必须成对出现。 */
+  /** 固定模型路由（组合层对象）；provider 与 model 必须成对出现。 */
   model?: { provider: string, model: string }
   /** 预设：调用方可用 `presetId` 选择，其 prompt 会追加到 system。 */
   presets?: ReadonlyArray<{ id: string, label?: string, prompt: string }>
@@ -121,12 +156,42 @@ export interface Config {
   timeoutMs?: number
   /** 采样温度（0..2；缺省不传，由适配器决定）。 */
   temperature?: number
+  /** 全局并发调用上限（1..64）。 @default 4 */
+  maxConcurrentCalls?: number
+  // ── 用户层（设置页写入；volatile；未设置 = undefined = 回落到组合层/内置默认） ──
+  /** 是否启用自定义系统提示词（默认 false = 用组合层/内置的系统提示词）。 */
+  customPromptEnabled?: boolean
+  /** 自定义系统提示词正文（与组合层 `systemPrompt` 分键）。 */
+  userSystemPrompt?: string
+  /** 模型 provider id（用户层标量，与组合层 `model` 对象分写）。 */
+  modelProvider?: string
+  /** 模型 id（与 modelProvider 成对）。 */
+  modelId?: string
+  /** 采样温度覆盖（与组合层 `temperature` 分键）。 */
+  userTemperature?: number
+  /** 输出 token 上限覆盖（与组合层 `maxOutputTokens` 分键）。 */
+  userMaxOutputTokens?: number
+  /** 单次调用超时覆盖（与组合层 `timeoutMs` 分键）。 */
+  userTimeoutMs?: number
+  /** 是否透传思考过程（未设置 = 默认开；只有显式的 false 才关）。 */
+  showReasoning?: boolean
+  /** 优化时用的思考强度（未设置 = 内置 low；取值是适配器所有的不透明字符串）。 */
+  defaultReasoningEffort?: string
+  /** 追加提示词列表（一个数组字段；activeProfileId 指向其中之一或内置条目 id）。 */
+  promptProfiles?: PromptProfile[]
+  /** 当前启用的追加条目 id；空串/缺省 = 不追加。 */
+  activeProfileId?: string
+  /** 「精简」风格的追加要求（遗留字段；同时是内置追加提示词的默认文案来源之一）。 */
+  stylePromptConcise?: string
+  /** 「转规格」风格的追加要求（遗留字段；同时是内置追加提示词的默认文案来源之一）。 */
+  stylePromptSpec?: string
 }
 
 /**
- * 宿主半入口：挂载 6 条路由并注册设置命名空间。
+ * 宿主半入口：挂载 6 条路由。设置表单由框架按 `Config` schema（lib/settings.js）自动投影，
+ * 用户层写进当前 profile 的 Cordis patch；volatile 字段由路由**每次请求现读**，所以保存即时生效。
  * @param ctx - 需要提供 `webServer` 与 `llm` 的宿主上下文。
- * @param config - 插件配置。
+ * @param config - 插件配置（base+user 合并值；用户层字段是只读引用）。
  */
 export declare function apply(ctx: unknown, config?: Config): void
 
