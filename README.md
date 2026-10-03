@@ -15,7 +15,7 @@ DSH Web GUI 插件：在**模型选择器左侧**加一个「AI 优化输入」�
 | P4 | 设置页：配置模型（名称 + 调用参数）与提示词，持久化并即时生效 | ✅ 已实现 |
 | P5.0 | 可运行性：dev 依赖软链脚本 + 真机安装验收 | ✅ 已实现（2026-09-11） |
 | P5.1 | 缺陷修复：日志全丢、`/check` 契约判型、未知终态误判失败、405 误报、保存假成功、组合层区间、样式归属 | ✅ 已实现（2026-09-11） |
-| P5.1b | **真机事故**：设置页恒显示「设置服务不可用」——命名空间注册是激活时读一次，输给了 settings 服务就绪的竞态 | ✅ 已修复（2026-09-11，含真框架集成测试） |
+| P5.1b | **真机事故**：设置页恒显示「设置服务不可用」——命名空间注册是激活时读一次，输给了 settings 服务就绪的竞态 | ✅ 已修复（2026-09-11，含真框架集成测试）。**0.2.0 起该服务已移除，整段注册逻辑随之下线**，见 P15 |
 | P5.2 | 规则单一来源：区间/上限/预设由 `/catalog` 下发，客户端不再维护会漂移的镜像 | ✅ 已实现（2026-09-11） |
 | P5.3 | 预设菜单：输入框旁 ▾ 菜单，选中后请求带 `presetId` | ✅ 已实现（2026-09-11） |
 | P5.4 | 信任判定改走框架 `ctx.connection.requestRejection()`（能力路由要浏览器会话） | ✅ 已实现（2026-09-11） |
@@ -36,10 +36,12 @@ DSH Web GUI 插件：在**模型选择器左侧**加一个「AI 优化输入」�
 | P12 | **控件收敛**：工具行只留 ✦ 与 ▾，撤销与思考回看收进 ▾ 菜单的「本次调用」分区；▾ 常驻并带"可撤销"角标；成功不再弹提示 | ✅ 已实现（2026-09-11） |
 | P13 | **通用输入角标**：主输入框之外的每个输入窗口（页面上的 `textarea` / 显式报名的控件）也挂一枚 ✦ 角标，点击即优化该输入框，成功后可 ↶ 撤销 | ✅ 已实现（2026-09-13） |
 | P14 | **思考强度**：设置页「调用参数」里可配优化时用的思考强度（内置默认 `low`）；宿主按模型公布的能力核对后才透传，模型不支持则回落适配器默认 | ✅ 已实现（2026-09-13） |
+| P15 | **适配 dsh 0.2.0 设置通道**：`ctx.settings.register` / `settingsScope` 已移除，改为插件 Config schema 自动投影——表单**只服务 `.volatile()` 字段**，且框架交给 `apply` 的是只读引用；组合层与用户层分键、用户层字段每次请求现读 | ✅ 已实现（2026-10-03，含表单可服务性的结构断言） |
 | P5.7b / P5.7c / P5.8 | typecheck（缺 tsc）、vitest+jsdom、芯片保留 | ⬜ 待做（见「下一步」与「工程化」） |
 
-检查：lint 零发现 · 约定守卫 29 条 · 测试 76 + 82 + 6 + 15 + 7 = 186 例，全绿
-（`npm run verify` = lint + 全部检查；`npm test` 会先自动补齐 dev 依赖链接）。
+检查：lint 零发现 · 约定守卫 30 条 · 测试 73 + 82 + 6 + 15 = 176 例，全绿
+（`npm run verify` = lint + 全部检查；`npm test` 会先自动补齐 dev 依赖链接；
+`test/settings-activation.mjs` 在当前 dsh 安装下按 SKIP 计，见「工程化」）。
 
 > **运行前提**：仓库里没有 `node_modules` 时，`npm test` 与 `link:` 方式安装后的运行时都跑不起来
 > （原因与自动修法见「开发循环」）。
@@ -51,20 +53,20 @@ package.json          双半声明：main(lib/index.js) + exports["./client"] + 
 biome.json            lint 配置（只 lint 不 format，见「工程化」）
 cordis.patch.yml      bundle patch + 组合层配置（设置页的用户值优先于它）
 lib/index.js          宿主半：6 条路由（一次性 JSON + 流式 SSE + 目录/试调 + 打开配置文件）+ LLM 调用 + 并发闸门
-lib/settings.js       宿主半：设置命名空间 schema 与跨字段校验（注册挂在 settings 就绪时）
+lib/settings.js       宿主半：插件 Config schema（用户层字段标 `.volatile()`，框架据此投影成设置表单）
 lib/policy.js         策略层：零依赖，配置校验/信任围栏/生效配置解析/风格提示词分层/追加提示词/显示思考过程/思考强度（可独立单测）
 lib/client.js         浏览器半：输入框按钮 + ▾ 统一菜单（撤销 / 思考回看 / 追加提示词 / 预设）+ 撤销栈 + 进度行与思考面板 + 通用输入角标（P13）+ 设置页（手写 __ModuleLoader__ bundle）
 lib/types/*.d.ts      对外类型
 .perf/                Web 启动耗时基准脚本与测量报告（README.md 有方法与原始数据）
-scripts/check-guards.mjs  约定守卫：把踩过的坑变成可自动检查的规则（29 条）
+scripts/check-guards.mjs  约定守卫：把踩过的坑变成可自动检查的规则（30 条）
 scripts/dsh-packages.mjs  定位 dsh 安装与其中的宿主包（脚本与测试共用）
 scripts/link-dev-deps.mjs 把宿主依赖软链进本仓库（`npm test` 前自动跑；CI 里自动跳过）
 scripts/lint.mjs      找 Biome 并跑 lint（仓库内 / 全局安装都能用）
-test/smoke.mjs        宿主半冒烟测试（76 例）
+test/smoke.mjs        宿主半冒烟测试（73 例）
 test/client.smoke.mjs 浏览器半冒烟测试（82 例：接线、控件收敛、流式回填、进度行与思考面板、统一菜单、撤销栈、设置页紧凑布局与思考强度）
 test/client.react.mjs 真 React 渲染测试（6 例：真 react/react-dom SSR，含"不得有 React 警告"）
 test/client.universal.mjs 通用输入角标测试（15 例：自带小 DOM 替身，覆盖扫描/定位/遮挡/写回/取消/手改/失败/回退/动态挂摘/卸载）
-test/settings-activation.mjs 真框架集成测试（7 例：真实 cordis + 真实 settings 提供者，含追加提示词、思考透传、思考强度全链路）
+test/settings-activation.mjs 真框架集成测试（7 例；dsh 0.2.0+ 已移除 `dsh-settings-file`，当前安装下整体 SKIP，待按新通道重写）
 .github/workflows/ci.yml  CI：lint + 约定守卫 + 五个套件（Windows）
 DESIGN.md             设计依据：座位/接口证据、撤销追加提示词、提示词分层、风险清单
 LICENSE               MIT
@@ -72,7 +74,7 @@ LICENSE               MIT
 
 ## 安装
 
-前置：`dsh` 0.1.2-rc.1+，profile 为 `web`（即 `~/.dsh/profiles/web`）。
+前置：`dsh` 0.2.0-rc.2+，profile 为 `web`（即 `~/.dsh/profiles/web`）。
 
 **第 1 步（两种方式都要做）**：把本包装进 profile，让包名能被解析到：
 
@@ -143,13 +145,14 @@ curl.exe -s -X POST http://127.0.0.1:3080/api/dsh-input-optimizer/optimize `
 ```powershell
 curl.exe -s http://127.0.0.1:3080/api/dsh-input-optimizer/catalog
 # 必须看到 "settings":{"available":true,...}
-# 若为 false，会同时带出宿主侧原因："reason":"..."
 ```
 
-   宿主日志里应同时出现两行：`better-input: mounted /api/dsh-input-optimizer/optimize (+stream/catalog/check/open-config)`
-   与 `better-input: settings namespace "better-input" registered`。
-   设置页保存后 `$DSH_HOME/settings.yaml` 里应出现 `better-input:` 段，`catalog` 的
-   `sources.*` 也从 `config`/`default` 变为 `settings`。
+   宿主日志里应出现 `better-input: mounted /api/dsh-input-optimizer/optimize (+stream/catalog/check/open-config)`
+   （0.2.0 起**不再有** `settings namespace "better-input" registered` 那行——表单由框架按 Config schema
+   自动投影，本插件不再登记命名空间）。
+   设置页保存后，**当前 profile 的 Cordis patch**（`~/.dsh/profiles/web/cordis.patch.yml`）里应出现
+   该 entry 的 `config:`，键是用户层存储键（`userSystemPrompt` / `userTemperature` / …）；
+   `catalog` 的 `sources.*` 相应从 `config`/`default` 变为 `settings`。
 4. **P8/P9（风格并入清单 + 系统提示词 / 追加提示词）**：✨ 右侧的 `▾` 菜单最上方是追加提示词区：
    「不追加」+ **精简 / 转规格**（内置条目，● = 当前启用）。点「转规格」→ 选中标记移动、提示"已切换"
    （`activeProfileId` 落盘）；点 ✨ 优化，请求体**不带** `styleIds`，效果 = 系统提示词 +
@@ -162,7 +165,7 @@ curl.exe -s http://127.0.0.1:3080/api/dsh-input-optimizer/catalog
 6. **P7（默认系统提示词可见 + 追加提示词切换）**：设置页「系统提示词」区点「查看默认系统提示词」→
    展开宿主下发的默认正文；「追加提示词」区点「新增追加提示词」、填名称与正文、保存；
    到输入框旁 `▾` 菜单点这条（● 移到它上面、提示"已切换"）→ 点 ✨ 优化，DevTools → Network 里
-   这次请求虽不带追加提示词信息，但宿主 `settings.yaml` 的 `activeProfileId` 已变、
+   这次请求虽不带追加提示词信息，但宿主 profile patch 里的 `activeProfileId` 已变、
    模型收到的 system 里多出 `本次额外要求（名称）：…`（`/catalog` 的 `effective.profileId` 同步更新，
    `sources.prompt` 仍如实标注**基底**来自哪一层）。
    「恢复默认配置」点一下会先弹确认，确认后追加提示词、自定义系统提示词、内置条目覆盖全部清空，
@@ -221,17 +224,18 @@ curl.exe -s -X POST http://127.0.0.1:3080/api/dsh-input-optimizer/check `
 ```powershell
 npm run verify                    # lint + 约定守卫 + 五个套件（推荐）
 npm test                          # 约定守卫 + 宿主半 + 浏览器半 + 真 React + 通用角标 + 真框架集成
-node test\smoke.mjs               # 宿主半 70 例：生效配置、信任判定、并发闸门、六路由全链路、SSE 分帧、思考透传、追加提示词（含内置种子）、打开配置文件
-node test\client.smoke.mjs        # 浏览器半 78 例：座位、控件收敛、流式回填、进度行与思考面板、统一菜单、撤销栈、设置页紧凑布局
+node test\smoke.mjs               # 宿主半 73 例：生效配置、信任判定、并发闸门、六路由全链路、SSE 分帧、思考透传、追加提示词（含内置种子）、打开配置文件、Config schema 与 volatile 引用现读
+node test\client.smoke.mjs        # 浏览器半 82 例：座位、控件收敛、流式回填、进度行与思考面板、统一菜单、撤销栈、设置页紧凑布局
 node test\client.react.mjs        # 真 React 6 例：真 react/react-dom SSR 渲染（含"不得有 React 警告"）
 node test\client.universal.mjs    # 通用角标 15 例：扫描/定位/遮挡/写回（原生 setter + input 事件）/取消/手改/失败还原/旧宿主回退/动态挂摘/卸载
-node test\settings-activation.mjs # 真框架集成 6 例：真实 cordis + 真实 settings 提供者，钉住注册时机、提示词与思考透传链路
+node test\settings-activation.mjs # 真框架集成 7 例：需要 @deepseek-ai/dsh-settings-file（0.2.0+ 已移除，当前安装下 SKIP）
 node .perf\measure-startup.mjs 12 # Web 启动耗时基准（12 轮冷启动；详见 .perf/README.md）
 ```
 
 > 各项检查覆盖什么/不覆盖什么、以及 typecheck 为何还没上，见「工程化」一节。
-> 宿主半测试与运行时都需要 `@deepseek-ai/dsh-llm`（设置半还需要 `@deepseek-ai/schemastery`）可见；
-> 集成测试还需要 `@deepseek-ai/cordis`、`@deepseek-ai/dsh-settings-file`；真 React 套件需要配对好的
+> 宿主半测试与运行时都需要 `@deepseek-ai/dsh-llm` 与 `@deepseek-ai/cosmokit`
+> （用户层字段是 volatile 引用，宿主半用 `isVolatile` 解引用）可见，设置 schema 还需要
+> `@deepseek-ai/schemastery`；集成测试还需要 `@deepseek-ai/cordis`；真 React 套件需要配对好的
 > `react`/`react-dom`。`npm test` 的 `pretest` 会自动建这些软链（`npm run link-deps`）；
 > 脚本会在 `$DSH_HOME/profiles`、`~/.dsh/profiles`、nvm 安装目录里找 dsh，找不到才报错
 > （也可用 `$env:DSH_INSTALL_ANCHOR` 显式指定含 `node_modules` 的目录）。
@@ -479,9 +483,9 @@ P6.1/P6.2 时代的「优化风格」是**可多选**的改写口味：▾ 菜�
   写入失败（mutate 不 reject）时选中标记回退并给出错误提示——与设置页保存同一条"写后自查"的规矩。
 - **拼装顺序**：系统提示词 → 启用中的追加提示词 →（旧客户端的 `styleIds`）→ 预设。
   固定顺序保证"同一组选择无论怎么点出来，system prompt 都逐字节相同"。
-- **存储**：整个清单是设置命名空间里的**一个数组字段**（`promptProfiles`，每项 `{id,name?,prompt}`），
+- **存储**：整个清单是用户层里的**一个数组字段**（`promptProfiles`，每项 `{id,name?,prompt}`），
   加上 `activeProfileId` 记录启用项。设置通道的 path ops 支持对单字段 set 任意 JSON 值，整表一次 set 天然原子；
-  `settings.yaml` 里看到的就是这两个人类可读的字段。
+  当前 profile 的 Cordis patch 里看到的就是这两个人类可读的字段。
 - **正文不出清单**：`/catalog` 的 `profiles` 行只含 id/名称/来源/是否内置（由 `profileRowsOf` 生成，守卫钉住）；
   设置页编辑的正文来自用户自己的设置镜像，与"风格/预设正文不下发"是同一条规矩——
   **唯一的例外**是 `defaults.systemPrompt`（内置/组合层的默认系统提示词）有意下发，见下。
@@ -578,16 +582,23 @@ P6.1/P6.2 时代的「优化风格」是**可多选**的改写口味：▾ 菜�
 | 调用参数 | Temperature、输出 token 上限、超时（毫秒）、**思考强度**（P14）、**显示思考过程**（P11） | 前三个留空 = 用适配器/组合配置/内置默认；「思考强度」留空 = 内置 `low`，它是适配器所有的不透明 id（建议值 `minimal`/`low`/`medium`/`high`，可手填），宿主调模型前会核对模型公布的能力、不支持就**省略并回落适配器默认**（不会让调用失败，`/catalog` 的 `effective.reasoningEffort` 可查生效值）；「显示思考过程」默认勾选，取消后宿主不再把模型的思考内容发给浏览器（见「进度与思考过程」） |
 | 操作 | 保存 / 恢复默认配置 / 打开插件配置文件 | 「恢复默认配置」先确认，再清空本页**所有**用户设置（含追加提示词与内置覆盖）；「打开插件配置文件」见上节 |
 
-**两层的取值**：**系统提示词**（基底）= 自定义开关 → `cordis.patch.yml` 的 `config.systemPrompt` → 内置默认；
+**两层的取值**：**系统提示词**（基底）= 自定义开关 → 组合配置的 `config.systemPrompt` → 内置默认；
 **追加提示词**（附加）= 启用中的那一条，接在基底之后。两者互不覆盖。
-设置页保存或菜单切换后**下一次优化即生效**（宿主每次请求现读解析后的配置），不需要重启或刷新。
+设置页保存或菜单切换后**下一次优化即生效**：用户层字段是 volatile **引用**，宿主在执行路由时
+每次请求 `.get()` 现读（见下「设置通道（dsh 0.2.0+）」），既不需要重启/刷新，也不触发插件重新挂载。
 
-**持久化**：走 dsh 标准设置通道——宿主 `ctx.settings.register('better-input', schema)`，文档由
-`dsh-settings-file` 落在 `$DSH_HOME/settings.yaml`。所以「重启应用 / 刷新页面后配置仍在」是框架保证的：
-本插件不自造存储，也不自己拼配置文件。
+**持久化**：走 dsh 标准设置通道——插件的 Config schema 由框架自动投影成设置表单，变更写进
+**当前 profile 的 Cordis patch**（`~/.dsh/profiles/web/cordis.patch.yml`）里该 entry 的 `config:`。
+所以「重启应用 / 刷新页面后配置仍在」是框架保证的：本插件不自造存储，也不自己拼配置文件。
 
-**校验**：客户端先行预校验（逐字段给中文提示，不合法就连写入都不会发出），宿主再用 schemastery schema
-+ 跨字段 `validate` 复核。典型规则：
+> **组合层与用户层用不同的键**：`systemPrompt` / `temperature` / `maxOutputTokens` / `timeoutMs`
+> 属于组合层（部署方写在组合的 `config:` 里，设置页**不可改**）；用户在设置页改的是
+> `userSystemPrompt` / `userTemperature` / `userMaxOutputTokens` / `userTimeoutMs`。
+> 共用键会让框架把两层合并成一个值，宿主就再也分不清"这是用户在设置页填的、还是配置文件里写的"，
+> `/catalog` 的 `sources.*` 便会把用户自己的输入报成「来自配置文件」。
+
+**校验**：客户端先行预校验（逐字段给中文提示，不合法就连写入都不会发出），宿主再用 Config schema
+在写入那一刻复核单字段的类型与区间。典型规则：
 
 - 启用了自定义提示词但内容为空 → 拒绝；
 - Provider 与模型名称只填了一个 → 拒绝（要么都填，要么都留空用默认）；
@@ -597,22 +608,48 @@ P6.1/P6.2 时代的「优化风格」是**可多选**的改写口味：▾ 菜�
 - 思考强度（P14）：必须是文本（空串 = 未设置 = 内置 `low`）；取值本身不做白名单——
   强度 id 归适配器所有，可用性由宿主按模型公布的能力核对。
 
-> **宿主拒绝时不会抛错**：`settingsScope.mutate()` 内部在 `!response.ok` 时只 `recover()` 然后正常返回
-> （只有装配错误才 reject），所以"保存成功"必须由调用方自己核对镜像里的值是否真的变了。
+> **跨字段约束只在客户端先跑，宿主侧刻意不跑**：`validateSettingsSection` 是纯函数，客户端保存前
+> 复跑一遍（`lib/client.js` 的 `validateForm`）；宿主侧**不在 `apply` 里跑**——用户层配置非法
+> （例如手工把 profile patch 改坏）不该让整个插件 apply 抛错挂掉。单字段的类型/区间由 Config schema
+> 在写入那一刻把关，所以坏值进不了存储。
+
+> **宿主拒绝时不会抛错**：`configForms` 的 `mutate()` 在宿主拒绝（revision 冲突 / schema 不过）时
+> **只返回 false，不 reject**，所以"保存成功"必须由调用方自己核对镜像里的值是否真的变了。
 > 设置页用 `opsApplied()` 做这件事：没生效就报「宿主没有接受这次写入…」并保留用户的编辑，
 > 绝不假报"已保存"。两侧的区间常量也保持同值，避免"客户端放行 → 宿主拒绝 → 静默失败"。
 
 **未配置时**：全部字段留空即可——宿主回落到默认模型（`agentDefaultModel.currentSelection()`）与
-默认系统提示词，不报错。若部署确实没挂设置提供者，设置页会显示「设置服务不可用」（并附上宿主返回的原因，
-如果有），而优化按钮照常工作。
+默认系统提示词，不报错。
 
-> **注册时机（真机事故修复，2026-09-11）**：命名空间注册**不能**在 `apply()` 里一次性
-> `ctx.get('settings')`——`SettingsProvider` 的 `async *[Service.init]()` 要 `await load()`
-> （读 `settings.yaml`）之后服务才 ACTIVE，而 `ctx.get(name)` 等价于
-> `ctx.reflect.get(name, strict = true)`，对"已提供但未 ACTIVE"的服务返回 `undefined`。
-> 本插件只 inject `webServer`/`llm`，**可能先于设置提供者激活**：一次读输掉竞态就永久降级，
-> 表现正是"设置服务不可用，重启也照样"。现在改为 `ctx.inject(['settings'], …)`：服务就绪才注册、
-> 服务卸载即回收（`lib/settings.js` 的 `bindSettings`）。
+### 设置通道（dsh 0.2.0+）
+
+dsh 0.2.0 移除了宿主 `ctx.settings.register(namespace, schema)` 与客户端 `settingsScope` 服务，
+改为**插件自己的 Config schema 自动投影成设置表单**（组合层 = base，设置页写入 = user 层）。
+三条不能忘的规矩：
+
+1. **表单只服务标了 `.volatile()` 的字段**。`dsh-settings` 的 `describe()` 对
+   `volatileForm(schema) === undefined` 的条目**直接跳过**——表单根本不下发，客户端的
+   `configForms.get('better-input')` 永远到不了 ready；`write()` 还会抛
+   `Plugin entry "…" has no volatile fields`，并对任何不落在 volatile 节点下的写入路径抛
+   `Config field "…" is not volatile`。[lib/settings.js](lib/settings.js) 给每个用户层字段都标了该标记，
+   [test/smoke.mjs](test/smoke.mjs) 有一条结构断言把 `SETTINGS_FIELD_KEYS` 与这些标记逐个对拍——
+   漏一个就整条设置页不可用。
+2. **`apply(ctx, config)` 拿到的是引用，不是值**：volatile 字段的输出类型变成 `Volatile<T>`
+   （`schema.meta.volatile` → `SchemaOutput` = `Volatile<T>`），要用 `.get()` 取值。
+3. **保存不会重新 apply**：volatile 的语义是 "editable **without remounting**"，所以宿主半在
+   **每次请求**用 [lib/index.js](lib/index.js) 的 `liveSection()` 现读
+   （`isVolatile(value) ? value.get() : value`，与 dsh 自带插件 `dsh-llm-deepseek` 的
+   `plainOptions()` 同法）——这才让"保存后下一次优化即生效"成立。
+
+> **旧的 `settings.yaml` 会被一次性导入**：Settings 启动、Loader 加载完所有条目后，早期版本留在
+> harness home 里的 `settings.yaml` 会按 section 名写进同名条目，随后文件改名为 `settings.yaml.imported`；
+> 没能落地的 section 只记日志、继续留在改名后的文件里。本机 `better-input:` 段
+> （`maxOutputTokens` / `activeProfileId`）就属于这一情形——profile patch 里没有该 entry，
+> 需要的话可按新键名手工搬过去。
+
+> **注册时机的旧事故（P5.1b）已成历史**：那条竞态（`ctx.get('settings')` 对"已提供但未 ACTIVE"
+> 的服务返回 `undefined`，一次读输掉就永久降级）随 `settings` 命名空间服务一起消失；
+> `bindSettings` 与 `test/settings-activation.mjs` 当初钉的就是它。
 
 ## 配置参考（`cordis.patch.yml` 的 `config:`）
 
@@ -633,6 +670,27 @@ P6.1/P6.2 时代的「优化风格」是**可多选**的改写口味：▾ 菜�
 未知字段名、类型错误或**超出取值域**都会让**启动失败并报出字段名**（fail loud，避免「拼错字段却以为生效了」，
 也避免 `AbortSignal.timeout` 超范围时每次请求都 502）。
 这项配置是**组合层**：设置页里的用户值优先于它，改它需要重启 `dsh web`（`patchReload: live` 会重载 patch，但插件自身的 Node 代码不热重载）。
+
+### 用户层存储键（设置页写入，一般不用手改）
+
+设置页保存的是同一份 Config 里标了 `.volatile()` 的用户层字段。**与组合层同名的四个字段用独立键**，
+所以你在当前 profile 的 Cordis patch 里看到的是：
+
+| 表单字段 | 存储键 | 说明 |
+|---|---|---|
+| 系统提示词 | `userSystemPrompt` | 由 `customPromptEnabled` 决定是否启用；启用时压过组合层的 `systemPrompt` |
+| Temperature | `userTemperature` | 压过组合层的 `temperature` |
+| 输出 token 上限 | `userMaxOutputTokens` | 压过组合层的 `maxOutputTokens` |
+| 超时（毫秒） | `userTimeoutMs` | 压过组合层的 `timeoutMs` |
+| 模型 provider / 模型 | `modelProvider` / `modelId` | 与组合层的 `model` 对象分写 |
+| 自定义提示词开关 | `customPromptEnabled` | 默认 `false`（用组合层/内置的系统提示词） |
+| 显示思考过程 | `showReasoning` | 未设置 = 开；只有显式 `false` 才关 |
+| 思考强度 | `defaultReasoningEffort` | 未设置 = 内置 `low` |
+| 追加提示词 | `promptProfiles` / `activeProfileId` | 整表一个数组字段 + 启用项 id |
+| 逐风格提示词 | `stylePromptConcise` / `stylePromptSpec` | 内置条目的覆盖正文 |
+
+这些键是**存储格式**，手改属于排查手段；每个用户层字段在 [lib/settings.js](lib/settings.js)
+里都必须保留 `.volatile()` 标记才可写（理由见上「设置通道」）。
 
 ## HTTP 契约
 
@@ -750,11 +808,12 @@ npm run link-deps  # 手动补 dev 依赖链接（pretest 会自动跑）
 | 检查 | 覆盖什么 | 覆盖不到什么 |
 |---|---|---|
 | **Biome lint** | 未使用变量/导入、可选链、赋值混进表达式、等宽比较等 | 不做类型检查（Biome 不是类型检查器） |
-| **约定守卫**（`scripts/check-guards.mjs`） | 19 条规则，逐条对应真实事故：`ctx.get('logger')`、设置注册一次性读、样式未打 `data-plugin`、保存未自查、并发闸门占位/释放、**闸门占位必须排在会抛的校验之后**、客户端自带宿主区间常量、SSE 分帧与流式回退、风格 id 校验、风格提示词不得下发、**清单行必须由 profileRowsOf 生成**、打开配置文件的路径与准入、新套件没接进 `npm test` | 只认字面写法，不理解语义（所以规则要写"为什么"） |
-| **宿主半冒烟**（67 例） | 配置校验、信任判定三分支、六路由全链路、SSE 分帧与断流、注册时机、并发闸门（含**失败后名额必须归还**的回归）、追加提示词（内置种子合成/分层/校验/catalog 行）、旧客户端 styleIds 兼容路径、catalog 不下发提示词正文、打开配置文件的候选链 | 不碰真实 LLM（`ctx.llm.stream` 是替身）；不起真实进程 |
-| **浏览器半冒烟**（69 例） | 座位注册、组件契约、接线与 CAS、流式回填（节流/中止/还原/回退）、追加提示词切换菜单（内置条目单选 + 落盘）、菜单关闭手势（点内部不收起）、**设置页紧凑布局**（默认无输入框 / 展开后可用 / 行距与一屏项数 / 旧版式不残留 / 校验失败自动展开）、内置清单行编辑与覆盖、默认系统提示词查看与填入、打开配置文件按钮、撤销栈 | 用**手写 React 替身**：hook 语义是简化的（但 `document` 监听器是真的登记表，否则"点内部不收起"这条测不出来） |
+| **约定守卫**（`scripts/check-guards.mjs`） | 30 条规则，逐条对应真实事故：`ctx.get('logger')`、**客户端不得再注入已移除的 `settingsScope`**、**宿主半不得再调 `ctx.settings.register`/`bindSettings`**、样式未打 `data-plugin`、保存未自查、并发闸门占位/释放、**闸门占位必须排在会抛的校验之后**、客户端自带宿主区间常量、SSE 分帧与流式回退、风格 id 校验、风格提示词不得下发、**清单行必须由 profileRowsOf 生成**、打开配置文件的路径与准入、新套件没接进 `npm test` | 只认字面写法，不理解语义（所以规则要写"为什么"）；`codeOnly` 规则只看代码骨架，注释里提到历史写法不会误报 |
+| **宿主半冒烟**（73 例） | 配置校验、信任判定三分支、六路由全链路、SSE 分帧与断流、并发闸门（含**失败后名额必须归还**的回归）、追加提示词（内置种子合成/分层/校验/catalog 行）、旧客户端 styleIds 兼容路径、catalog 不下发提示词正文、打开配置文件的候选链、**Config schema 的用户层字段必须全部标 `.volatile()`（漏一个设置页就整条不可用）**、**volatile 引用每次请求现读** | 不碰真实 LLM（`ctx.llm.stream` 是替身）；不起真实进程 |
+| **浏览器半冒烟**（82 例） | 座位注册、组件契约、接线与 CAS、流式回填（节流/中止/还原/回退）、追加提示词切换菜单（内置条目单选 + 落盘）、菜单关闭手势（点内部不收起）、**设置页紧凑布局**（默认无输入框 / 展开后可用 / 行距与一屏项数 / 旧版式不残留 / 校验失败自动展开）、内置清单行编辑与覆盖、默认系统提示词查看与填入、打开配置文件按钮、撤销栈 | 用**手写 React 替身**：hook 语义是简化的（但 `document` 监听器是真的登记表，否则"点内部不收起"这条测不出来） |
 | **真 React 渲染**（6 例） | 用真 `react`/`react-dom` 走 SSR 真渲染路径，并把渲染期 `console.error`（React 的警告通道）当失败 | SSR 不跑 effect、也没有 DOM：拉目录/订阅/点击/菜单开合不在范围 |
-| **真框架集成**（5 例） | 真 cordis + 真 `dsh-settings-file`：提供者先到/后到/缺失三种时序、"注册后写得进 `settings.yaml`"，以及**逐风格提示词与追加提示词的全链路**（写入 → 落盘 → 生效来源变 `settings`/`profile` → 下一次请求的 system 真的用它） | 不启真实 webserver、不调真实 LLM（两者都用替身捕获） |
+| **通用输入角标**（15 例） | 自带小 DOM 替身：扫描/定位/遮挡/写回（原生 setter + input 事件）/取消/手改/失败还原/旧宿主回退/动态挂摘/卸载回收 | DOM 替身不是真浏览器：布局与真实事件时序只覆盖到契约层 |
+| **真框架集成**（7 例） | 真 cordis + 真 `dsh-settings-file`：提供者先到/后到/缺失三种时序、「注册后写得进文档」，以及**逐风格提示词与追加提示词的全链路**（写入 → 落盘 → 生效来源变 `settings` → 下一次请求的 system 真的用它） | **0.2.0+ 已移除该提供者，当前安装下整套 SKIP**——它当初钉的注册时机缺陷已随服务消失，待按新通道重写；不启真实 webserver、不调真实 LLM（两者都用替身捕获） |
 | **启动耗时基准**（`.perf/`） | `dsh web` 冷启动墙钟时间、插件边际成本、阶段归因；交替 A/B 消抖动 | 不起真实 GUI（`--port 0 --no-open`，不影响正在跑的实例） |
 
 **为什么只 lint 不 format**：既有代码的排版是刻意的（CSS 片段逐条成行、测试里成组的紧凑断言、JSDoc 分组），

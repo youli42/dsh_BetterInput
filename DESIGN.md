@@ -30,12 +30,12 @@
 | `package.json` | 双半声明（`main` + `exports["./client"]` + `dsh.client` / `dsh.bundle.patch`） |
 | `cordis.patch.yml` | 把自己 insert 进插件树，内含唯一的配置入口 |
 | `lib/policy.js` | 零依赖策略层：配置校验、信任围栏、**生效配置解析**、JSON 收发 |
-| `lib/settings.js` | 宿主半：设置命名空间 schema + 跨字段 `validate` |
-| `lib/index.js` | 宿主半：4 条路由（optimize / catalog / catalog-models / check）+ `ctx.llm.stream()` |
+| `lib/settings.js` | 宿主半：`Config` schema（用户层字段标 `.volatile()`，框架据此投影成设置表单；见 P15） |
+| `lib/index.js` | 宿主半：6 条路由（optimize / stream / catalog / catalog-models / check / open-config）+ `ctx.llm.stream()` |
 | `lib/client.js` | 浏览器半：输入框按钮 + CAS + 撤销栈 + **设置页**（手写 bundle，无构建步骤） |
 | `lib/types/*.d.ts` | 对外契约类型（含组件行为契约、设置段字段） |
 | `scripts/link-dev-deps.mjs` | 把宿主的 `@deepseek-ai/*` 软链进本仓库（`pretest` 自动跑；`link:` 安装的运行时同样必需） |
-| `test/smoke.mjs`（49 例）、`test/client.smoke.mjs`（48 例）、`test/client.react.mjs`（6 例）、`test/settings-activation.mjs`（3 例） | 共 106 例，全绿；外加 11 条约定守卫与 Biome lint（`npm run verify`） |
+| `test/smoke.mjs`（73 例）、`test/client.smoke.mjs`（82 例）、`test/client.react.mjs`（6 例）、`test/settings-activation.mjs`（7 例，0.2.0 下 SKIP） | 共 176 例可跑，全绿；外加 30 条约定守卫与 Biome lint（`npm run verify`） |
 | `test/client.universal.mjs`（15 例，P13） | 通用输入角标的 DOM 层测试；自带小 DOM 替身，覆盖边界写在文件头 |
 
 **验收证据**：P0 曾在 Web GUI 目视确认（2026-09-10，当时用 `link:D:\SSDWP\AI\dsh\BetterInput` 装入 profile）。
@@ -63,10 +63,14 @@ P1 的路由此后仍需在真机上 curl 一次（单测用假 LLM 流覆盖了
 
 ### P4（设置页）的实现选择与理由
 
-8. **配置读写走 dsh 标准设置通道，而不是自造存储**：宿主 `ctx.settings.register('better-input', schema, { applies: 'live', validate })`，
-   客户端 `ctx.settingsScope.bind({ namespace })`。收益是白拿四件事——持久化（`dsh-settings-file` 落到
-   `$DSH_HOME/settings.yaml`）、宿主校验、版本栅栏（写入带 revision，冲突会拒绝）、双端一致（同一份文档镜像）。
+8. **配置读写走 dsh 标准设置通道，而不是自造存储**（**P15 起换成 0.2.0 的新通道**，见下）：
+   当时是宿主 `ctx.settings.register('better-input', schema, { applies: 'live', validate })` +
+   客户端 `ctx.settingsScope.bind({ namespace })`。收益是白拿四件事——持久化、宿主校验、
+   版本栅栏（写入带 revision，冲突会拒绝）、双端一致（同一份文档镜像）。
    自造 JSON 文件或 localStorage 都要自己实现这四件事，且「重启/刷新后仍在」会变成我自己的责任。
+   > **0.2.0 起**：`ctx.settings.register` 与客户端 `settingsScope` 都已移除，改为「插件 Config
+   > schema 自动投影成表单」——同样的四件事照旧白拿，但**键与值的形态都变了**：用户层字段必须标
+   > `.volatile()`，且到达 `apply` 的是引用。详见 P15。
 9. **设置段刻意扁平**：客户端 `SettingsScope.set(field, value)` 只接受命名空间内的标量字段，嵌套结构得拼
    path ops。扁平让「保存」既保持原子（一次 `mutate(ops, revision)`）又不必写路径。
 10. **除 `customPromptEnabled` 外一律不给 schema 默认值**：未设置 = `undefined` = 回落到组合配置/内置默认。
@@ -101,9 +105,10 @@ P1 的路由此后仍需在真机上 curl 一次（单测用假 LLM 流覆盖了
 17. **"路由未挂载"的 405 误报** —— web 组合里未匹配的路径由 SPA fallback 接管，而它对非 GET/HEAD
     的请求**先**回 405 空体、再去找文件（`dsh-host-frontend-static` 在读盘前就拦掉了非 GET/HEAD）。
     所以宿主半没挂载时 `POST /optimize` 拿到的是 405，不是 404——只映射 404 的话专门文案永不出现。
-18. **保存假成功（最严重的一条）** —— `settingsScope.mutate()` 在宿主拒绝时**不会 reject**：
-    内部 `if (!response.ok) { await this.recover(generation); return }`，而 Typert 的 `RemoteResult`
-    把载体失败折进 `{ ok:false }` 分支、只有装配错误才抛。旧代码 `await` 完就 flash「已保存」，
+18. **保存假成功（最严重的一条）** —— 设置通道的 `mutate()` 在宿主拒绝时**不会 reject**：
+    当时的实现是内部 `if (!response.ok) { await this.recover(generation); return }`，而 Typert 的
+    `RemoteResult` 把载体失败折进 `{ ok:false }` 分支、只有装配错误才抛；**0.2.0 起改为直接返回
+    `false`**，但"不 reject"这一点没变。旧代码 `await` 完就 flash「已保存」，
     于是 revision 冲突或宿主校验不过时用户以为存上了。现在写后自查镜像里的值
     （`opsApplied()`，判据用**值**而不是 revision——并发被拒时 revision 也可能被别人推进过），
     没生效就报错并保留用户的编辑。客户端镜像同时补上上界（`maxOutputTokens ≤ 200000`、
@@ -133,6 +138,11 @@ P1 的路由此后仍需在真机上 curl 一次（单测用假 LLM 流覆盖了
 > P5.2–P5.4 的实施记录见本文档 §0.5 第 26–28 条（紧接 P5.1b 之后）。
 
 ### P5.1b（真机事故：设置页恒显示「设置服务不可用」，2026-09-11）
+
+> **已废止（P15，2026-10-03）**：本节描述的 `settings` 命名空间服务在 dsh 0.2.0 已被移除，
+> `bindSettings`、`ctx.inject(['settings'], …)` 与 `/catalog` 的 `settings.reason` 通道一并下线，
+> 本节钉住的注册时序竞态随之不复存在。下面保留为历史记录（那条竞态是真的，只是承载它的服务没了）；
+> 当前设置通道见 P15。
 
 **现象**：重启后设置页始终显示「设置服务不可用：宿主端没有挂载设置提供者（或插件宿主半未加载）」，
 配置无法保存；优化按钮照常工作。
@@ -325,7 +335,7 @@ P1 的路由此后仍需在真机上 curl 一次（单测用假 LLM 流覆盖了
     而追加提示词是**整表读写**：dsh-settings 的 path ops 对单字段 set 任意 JSON 值本就原子
     （`applyPathOp`/`cloneJsonShaped` 明确支持数组），schemastery 也有 `z.array(z.object(...))`，
     整表一次 set 反而比"每条追加提示词一个字段"更简单、更不怕并发。真框架集成测试验证了全链路：
-    写入 → 落盘 `settings.yaml` → catalog 行（id/名称）→ 下一次请求的 system 里真的出现那段追加内容。
+    写入 → 落盘（0.2.0 前是 `settings.yaml`，现在是 profile 的 Cordis patch）→ catalog 行（id/名称）→ 下一次请求的 system 里真的出现那段追加内容。
 46. **取值与防御性回落**（P9 起：基底与追加分开算，见 50/51）：**基底**系统提示词 =
     「自定义开关 → 组合配置 → 内置默认」；**追加**由启用中的条目在拼装期接上。
     `effectiveConfig` 对追加条目做防御性过滤（id/正文齐全才算数），坏条目当不存在而不是让
@@ -336,9 +346,10 @@ P1 的路由此后仍需在真机上 curl 一次（单测用假 LLM 流覆盖了
     `mutate([{op:'set', path:['activeProfileId'], value}])` → 用 `opsApplied()` 核对镜像；
     失败（mutate 不 reject）则回退标记并提示。为此 `opsApplied` 升级为**结构化值深比较**
     （`sameValue`：对象/数组用 JSON 比较）——结构化值经设置通道往返后引用必然不同，
-    还用 `===` 会把成功的写入误报成失败。座位组件不依赖 settingsScope（照常先注册），
-    由另一条 `ctx.inject(['slots','settingsScope'])` 把绑定的 scope 塞进模块级门面，
-    服务缺失时追加提示词菜单本来就不会出现（追加提示词清单来自设置段），按钮的其余功能不受影响。
+    还用 `===` 会把成功的写入误报成失败。座位组件不依赖设置表单（照常先注册），
+    由另一条 `ctx.inject(['slots','configForms'])`（0.2.0 前是 `settingsScope`）把表单手柄
+    塞进模块级门面，表单缺失时追加提示词菜单本来就不会出现（追加提示词清单来自设置段），
+    按钮的其余功能不受影响。
 
 ### P8（风格并入清单，2026-09-11）
 
@@ -562,7 +573,65 @@ P1 的路由此后仍需在真机上 curl 一次（单测用假 LLM 流覆盖了
     （第 84 条），所以放在"会抛的校验之后、`gate.acquire()` 之前"正是与既有闸门纪律一致的位置。
     另外，**配置层永远有值**（`effectiveConfig` 未设置也返回 `low`），真正用不用由模型能力决定，
     并如实反映在 `/catalog` 的 `effective.reasoningEffort` 上——排查"为什么思考强度没生效"时
-    不必去翻 `settings.yaml` 或猜适配器行为。
+    不必去翻 profile patch 或猜适配器行为。
+
+### P15（适配 dsh 0.2.0 设置通道：Config schema 自动投影，2026-10-03）
+
+**背景**：dsh 0.2.0 移除了宿主 `ctx.settings.register(namespace, schema)` 与客户端 `settingsScope`
+服务，设置通道改为「插件自己的 Config schema 自动投影成表单」。迁移的第一版只把字段并进 `Config`
+并删掉注册逻辑，**没有标 `.volatile()`**——而表单只服务 volatile 字段，于是整条设置页不可用
+（症状与 P5.1b 同类：设置页显示不可用、保存写不进去）。
+
+**缺陷与证据**（`@deepseek-ai/dsh-settings` 的 `lib/index.js`）：
+
+| 位置 | 代码 | 后果 |
+|---|---|---|
+| `describe()` | `const form = volatileForm(schema); if (form === void 0) return []` | 没有 volatile 字段的 entry **不进表单目录**，客户端 `configForms.get('better-input')` 永远到不了 ready |
+| `write()` | `if (form === void 0) throw new Error('Plugin entry "…" has no volatile fields')` | 任何保存都抛错 |
+| `write()` | `if (!isVolatilePath(schema, path)) throw new Error('Config field "…" is not volatile')` | 写到非 volatile 路径同样抛错 |
+
+`volatileForm()` 是递归的：只有"自己标了 volatile"或"有标了 volatile 的后代"才产出表单。
+把当时的 `Config` 喂给框架这段逻辑，返回的正是 `undefined`。
+
+**设计决定**：
+
+1. **用户层字段逐个标 `.volatile()`，组合层字段一个都不标**。组合层（`enabled`/`systemPrompt`/
+   `model`/`presets`/`maxInputChars`/`maxOutputTokens`/`timeoutMs`/`temperature`/`maxConcurrentCalls`）
+   由部署方写在组合的 `config:` 里，开放给表单等于让用户改部署配置；`enabled` 与 `maxConcurrentCalls`
+   更是只在 `apply` 期用（改了也得重新挂载才有意义）。
+2. **组合层与用户层用不同的键**。两层共用一份 schema，"同名重叠"的四个字段
+   （`systemPrompt`/`temperature`/`maxOutputTokens`/`timeoutMs`）合并后只剩一个值，宿主再也分不清来源——
+   `/catalog` 的 `sources.*` 会把用户刚填的值报成 `config`，设置页便对着用户自己的输入显示「来自配置文件」
+   （P10 的用例钉着这条）。所以用户层改用 `userSystemPrompt`/`userTemperature`/`userMaxOutputTokens`/
+   `userTimeoutMs`（`USER_FIELD_KEYS`），**表单字段名不变**，只在客户端 `STORAGE_KEYS` 一处映射。
+   顺带修掉一个潜在缺陷：以前表单回填的是**合并值**，"留空 = 用组合层默认"这条语义在组合层配了值时
+   会被显示成"用户已填"，一点保存就把组合层的值固化成用户覆盖。
+3. **`apply` 收到的是引用，必须现读**。volatile 字段的输出类型是 `Volatile<T>`
+   （schemastery：`SchemaOutput<T, 'volatile'> = Volatile<T | undefined>`），要用 `.get()` 取值；
+   dsh 自带插件同法（`dsh-llm-deepseek` 的 `plainOptions()`、
+   `dsh-agent-loop` 的 `config.maxParallelToolCalls.get()`）。而 volatile 的语义是
+   "editable **without remounting**"——**保存不会重新 apply**，所以 `resolveConfig` 只收下引用
+   （`sectionRefs`），宿主半在**每次请求**用 `liveSection()` 解引用后再算生效配置。
+   这同时是"保存后下一次优化即生效"的唯一实现方式：第一版把它写成"loader 合并后重新调用 apply"，
+   那是错的（那样会退化成"重启才生效"）。
+4. **跨字段校验仍在客户端先跑，宿主侧不跑**。`validateSettingsSection` 保持纯函数导出；
+   宿主侧不在 `resolveConfig` 里调用它，避免用户层配置非法（例如手工改坏 profile patch）时整个插件
+   apply 抛错挂掉。单字段类型/区间由 Config schema 在写入那一刻把关，坏值进不了存储。
+5. **回归防线**：`test/smoke.mjs` 新增结构断言——`SETTINGS_FIELD_KEYS` 的每个键都必须是
+   `Config.dict[key].meta.volatile === true`，`COMPOSITION_FIELD_KEYS` 的每个键都必须**不是**；
+   两类合起来必须**正好**等于 schema 的全部字段（新增字段漏归类也会失败）。其中"用户层必须 volatile"
+   就是这次缺陷的直接防线。另有一条用例用可变引用模拟"用户在设置页保存"，钉住"第二次请求必须读到新值"
+   （若有人把值缓存到 apply 期，它会立刻失败）。
+
+**配套改动**：`engines.dsh` → `>=0.2.0-rc.2`；`@deepseek-ai/cosmokit` 成为运行时依赖（`isVolatile`）；
+`scripts/link-dev-deps.mjs` 去掉已移除的 `dsh-settings-file`，`test/settings-activation.mjs` 在缺它时 SKIP
+（它当初钉的注册时机缺陷已随服务消失）；`/catalog` 的 `available` 恒为 `true`（真正的可用性由客户端
+`configForms` 快照的 `status` 反映），`settings.reason` 通道随注册逻辑一起下线。
+
+**遗留数据**：本机 `$DSH_HOME/settings.yaml.imported` 里仍有 `better-input:` 段
+（`maxOutputTokens: 4096`、`activeProfileId: concise`）。它没能落进 profile patch——导入发生在
+本插件还没有 `Config` schema 的时候，被当作"当前组合拒绝的 section"记日志、留在改名后的文件里。
+新通道下键名已变（`userMaxOutputTokens` 等），需要的话按新键名手工搬过去。
 
 ---
 
@@ -800,11 +869,19 @@ UI：一个 entry 组件渲染两个按钮（`[↶ 撤销]` `[✨ 优化]`），
 - 未知 key 要主动报错（照抄 `session-title-llm` 的 `CONFIG_KEYS` 校验），避免用户拼错字段却以为生效了。
 - `provider`/`model` 必须成对出现，只给一个是配置错误。
 
-### L2 · settings 命名空间（第二期）
+### L2 · 插件 Config schema 投影出设置表单（第二期；P15 起为 0.2.0 通道）
 
-`ctx.settings.register(settingsNamespace('better-input'), schema, ...)`：
-- 用户级配置从 `cordis.patch.yml` 挪到 `settings.yaml`，可运行时热更新（`applies: 'live'`，宿主半必须**订阅**该命名空间的变化，而不是构造期读一次）。
-- `ctx.settings.describe()` 会把命名空间（含 schemastery `toJSON()`）暴露给配置界面；但 Settings 面板的每个分区都是手写组件（`settings.section` 是 list 座位，`packages/client/ui-settings-plugins`、`ui-settings-models` 各自注册自己的分区），**不会自动为你渲染表单**。所以「图形化编辑提示词」需要自己注册 `settings.section` 或 `settings.general.item` 座位。
+**0.2.0 前**是 `ctx.settings.register(settingsNamespace('better-input'), schema, ...)`：用户级配置从
+`cordis.patch.yml` 挪到 `settings.yaml`，可运行时热更新（`applies: 'live'`）。该 API 已随
+`settingsScope` 一起移除。
+
+**现在**：插件导出 `Config`（`lib/settings.js`），框架把**标了 `.volatile()` 的字段**自动投影成设置表单：
+- 用户层值写进**当前 profile 的 Cordis patch**，同样可运行时热更新，但"即时生效"要靠插件**每次请求
+  现读** volatile 引用——保存不触发重新 apply（见 P15）；
+- 想看 `toJSON()` 后的 schema 或已服务命名空间目录，走客户端 `ctx.configForms.describe()`；
+  单个 entry 的读写走 `ctx.configForms.get(entryId)`；
+- Settings 面板的分区仍是手写组件（`settings.section` 是 list 座位），**不会自动渲染成页面**——
+  本插件自己注册 `settings.section` 画那张设置页，只是数据源从 `settingsScope` 换成了 `configForms`。
 
 ### L3 · 输入框旁的预设菜单（第三期）
 
@@ -1015,7 +1092,7 @@ window.__ModuleLoader__.load({
 | **P1** 宿主路由 | `/api/dsh-input-optimizer/optimize` + 固定 system prompt + `ctx.llm.stream` | ✅ 已实现（宿主半 42 例绿；真机 curl 已确认 200） |
 | **P2** 前后端接线 | 读 `input.draft` → POST → `setDraft` + CAS + 取消 + 失败提示 | ✅ 已实现（含 stale 丢弃、403/404/405/网络/空结果文案） |
 | **P3** 撤销 | 撤销栈 + CAS + 撤销按钮 + 文本相等判据 | ✅ 已实现（含二次点击强制还原、10 层深度、按会话隔离 + 20 会话 LRU） |
-| **P4** 提示词与模型配置页 | 设置面板分区（`settings.section`）：模型 + 调用参数 + 提示词，持久化 + 即时生效 + 校验 | ✅ 已实现（`applies: 'live'`；落 `settings.yaml`；设置页 12 条用例覆盖校验/持久化回填/不可用态） |
+| **P4** 提示词与模型配置页 | 设置面板分区（`settings.section`）：模型 + 调用参数 + 提示词，持久化 + 即时生效 + 校验 | ✅ 已实现（P15 起落 profile 的 Cordis patch + volatile 引用现读；设置页 82 例覆盖校验/持久化回填/不可用态） |
 | **P5.0** 可运行性 | dev 依赖软链脚本 + 安装/验收步骤可复现 | ✅ 已实现（2026-09-11；`npm test` 前自动链接宿主依赖） |
 | **P5.1** 缺陷修复 | 逐条核对装机版 API：日志、判型、终态语义、405 文案、保存假成功、组合层区间、样式归属 | ✅ 已实现（2026-09-11；共 7 项，见 §0.5 第 14–22 条） |
 | **P5.1b** 设置页不可用 | 命名空间注册时机竞态（`ctx.get('settings')` 一次性读 vs 服务 ACTIVE 时机） | ✅ 已修复（2026-09-11；真框架集成测试 3 例，见 §0.5 第 23–25 条） |
@@ -1051,7 +1128,7 @@ window.__ModuleLoader__.load({
 | R-12 | Windows 上 patch 的 `name` 写绝对路径不解析（Loader 对非 `.` specifier 直接 `import(name)`，`D:\` 被当成 URL scheme `d:`）；相对 specifier 又相对 profile 目录（C 盘）解析，跨盘无解 | 无法用「绝对路径直挂」这个便捷开发方式 | 必须先用 `dsh plugin --profile web add link:<本目录>` 装进 profile 的 node_modules，再用包名引用（README 安装章节已写明） |
 | R-13 | **真机事故**：已装 0.1.2-rc.1 对 `conversation.input.left/right` 调 `renderSlot(name, {})`，**没有 owner props**；只有新版本源码才传 `InputZone` | 第一版读 `props.input` → 点击即 `TypeError`，功能废掉 | 状态一律走 `props.useInput`；异步路径走渲染期写入的 ref；文档与测试按「两种形状」覆盖（`test/client.smoke.mjs` 的 `inputZone` 开关）。升级 dsh 后需重核 |
 | R-14 | `ctx.get('logger')` 恒为 `undefined`（logger 是 root context 的自有属性，不是 reflect 服务） | 宿主日志/告警**全部静默丢弃**，故障无从排查 | 用 `ctx.logger`；消息按 printf 风格传参。测试替身也照抄"`get('logger')` 返回 undefined"，并断言日志确实落库（P5.1 第 14 条） |
-| R-15 | `settingsScope.mutate()` 在宿主拒绝时**不 reject**（只 `recover()` 后正常返回；Typert 把载体失败折进 `{ok:false}`） | 保存界面假报"已保存"，实际没写入（revision 冲突、字段超宿主区间时必现） | 写后自查镜像值（`opsApplied()`，判据用值而非 revision）；客户端镜像补齐上界；测试替身改成"拒绝=静默返回"（P5.1 第 18 条） |
+| R-15 | 设置通道的 `mutate()` 在宿主拒绝时**不 reject**（0.2.0 前只 `recover()` 后正常返回；0.2.0 起返回 `false`，同样不抛） | 保存界面假报"已保存"，实际没写入（revision 冲突、字段超宿主区间时必现） | 写后自查镜像值（`opsApplied()`，判据用值而非 revision）；客户端镜像补齐上界；测试替身改成"拒绝=静默不生效"（P5.1 第 18 条） |
 | R-16 | web 组合里未匹配路径由 SPA fallback 接管，它对非 GET/HEAD **先**回 405 空体 | 宿主半没挂载时客户端拿到 405 而非 404 → 误导成"宿主返回错误" | 404/405 一并映射到「路由未挂载」文案；插件自己的 405 带 JSON message，优先展示（P5.1 第 17 条） |
 | R-17 | 组合层配置的数值不在区间内（如 `timeoutMs = 5e9`）→ `AbortSignal.timeout()` 抛 `ERR_OUT_OF_RANGE`（上限 4294967295） | **每次**请求 502，用户只看到"优化失败" | `resolveConfig` 按 `TIMEOUT_RANGE`/`MAX_OUTPUT_TOKENS_RANGE` 校验，启动期 fail loud（P5.1 第 19 条） |
 | R-18 | 框架在**物化期**把未打标的 `<style>` 认领给当时物化的插件；`apply()` 晚于物化 | 样式表被别的插件认领走，其 HMR 重载时按 `style[data-plugin]` 删除 → 本插件丢样式，只有整页刷新才恢复 | 注入时自带 `data-plugin`/`data-plugin-css`（P5.1 第 20 条） |
