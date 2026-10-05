@@ -2319,7 +2319,7 @@ await test('内置追加提示词以内置行渲染在追加提示词清单最�
 })
 await test('编辑内置追加提示词保存：存储整体替换条目（名称取词典固定值），只发变化的部分', async () => {
   const page = mountSettings({ settingsValue: {} })
-  let view = page.open('profile:concise')
+  const view = page.open('profile:concise')
   view.inputs.get('profilePrompt:concise').props.onChange({ target: { value: '我自己的精简全文' } })
   await page.view().action('save').props.onClick()
   assert.equal(page.scope.mutations.length, 1)

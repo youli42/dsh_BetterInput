@@ -37,14 +37,19 @@ jobs:
       #    dsh-llm（`npm test` 随之 exit 1）；去掉后装进 28 个包、react/react-dom 精确配成 18.3.1，
       #    且没有 ERESOLVE——react 18.3.1 本来就满足 peer 声明的 ^18.2.0，本来不需要跳过 peer 解析。
       # ⚠️ 版本按"验证过的那一版 dsh"写死；dsh 升级后这几行要跟着调。
+      # 当前钉 0.2.0-rc.2（= package.json `dsh.engines` 要求的最低版）：插件已适配 dsh 0.2.0
+      # 的设置通道（Config schema 自动投影），不再注册 settings 命名空间。
+      # ⚠️ 不要再装 `@deepseek-ai/dsh-settings-file`：0.2.0 已移除该包。装了旧版反而会把
+      #    test/settings-activation.mjs 拖进旧路径跑（旧 settings 服务要求 registerNamespace，
+      #    插件已不再调用）→ 7 个用例红（2026-10-03 CI exit 1 的根因）。不装它，该套件会按
+      #    设计 SKIP（exit 0），与本地行为一致；端到端验证走 README 的真机步骤。
       - name: 安装宿主依赖与工具
         run: >
           npm install --no-save --no-audit --no-fund
-          @deepseek-ai/dsh-llm@0.1.2-rc.1
+          @deepseek-ai/dsh-llm@0.2.0-rc.2
           @deepseek-ai/schemastery@^3
           @deepseek-ai/cordis@^4
-          @deepseek-ai/dsh-settings@0.1.2-rc.1
-          @deepseek-ai/dsh-settings-file@0.1.2-rc.1
+          @deepseek-ai/dsh-settings@0.2.0-rc.2
           react@18.3.1
           react-dom@18.3.1
           @biomejs/biome@^2.5.8
@@ -62,6 +67,8 @@ jobs:
 
       # `npm test` 会先跑约定守卫，再跑宿主半 / 浏览器半 / 真 React / 真框架集成四个套件。
       # pretest 的 link-dev-deps 在 CI 里会发现依赖已可从仓库解析，安静跳过。
+      # 真框架集成套件（settings-activation）钉着旧的 dsh-settings-file 提供者，0.2.0 下会
+      # SKIP（exit 0）——与本地一致，不是回归；套件重写后这里会恢复为真实执行。
       # 顺带一提：CI 用的是 react 18（本机那对是 19），所以真 React 套件在两条版本上都跑。
       - name: 测试
         run: npm test
