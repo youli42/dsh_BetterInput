@@ -59,6 +59,9 @@ jobs:
       # `npm ls` 只校验 package.json 里声明过的依赖，而被静默跳过的恰好就是那三个 peer
       # （@deepseek-ai/dsh-llm / react / @deepseek-ai/schemastery）：装齐时 exit 0（多出来的
       # extraneous 条目不算错），缺任何一个都 exit 1。
+      # 另一个会 exit 1 的情形是 peer **invalid**（2026-10-05 实测）：peer 范围与这里钉的版本
+      # 冲突（如 dsh-llm 写 ">=0.1.2-rc.1" 时，semver 不把 0.2.0-rc.2 这类不同元组的预发布
+      # 版算进范围）。所以升级这里的版本时，peerDependencies 的下限必须同步调。
       - name: 校验宿主依赖真的装进来了
         run: npm ls --depth=0
 
